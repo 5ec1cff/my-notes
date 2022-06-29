@@ -2,7 +2,7 @@
 
 ## 「自启动」权限  
 
-自启动看起来包括了服务重启（导致无障碍服务 crash 后无法自动重启，看上去被系统认为是结束了），此外还有 wakepath 之类的东西。
+自启动看起来包括了服务重启、开机广播，还有 wakepath （应用唤起 activity）等。
 
 包含自启动设置的 Activity :`com/miui/appmanager/ApplicationsDetailsActivity` ，属于 `com.miui.securitycenter` 包（也就是应用详情）。
 
@@ -92,7 +92,7 @@ userForeground=0
 
 如果应用详情的自启动显示为「允许」是在这个 ui 设置的，那么用上面的 call 方法设置为「禁止」之后并不会反映在 ui 中，也就是仍然显示为「允许」（甚至强杀重启都不会改变），但是 query 的结果明明和手动关闭一致。但如果是我们用 call 方法设置过的「允许」，就不会有上述问题。至于 call 了之后是不是真的起作用了，也有待进一步研究。
 
-## 附录 1
+## 附录 1 PermissionManager 的常量
 
 <a id="constants"></a>
 
