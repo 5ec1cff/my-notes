@@ -170,7 +170,7 @@ exec /system/bin/app_process $java_options -Djava.class.path=./ash.apk / five.ec
 
 看起来 `suspend=y` 是不允许的，但是 scrcpy 为什么可以？
 
-把 suspend 改成 n ，总算可以启动了，但是 AS 仍然无法识别进程。
+既然这样，就把 suspend 改成 n ，然后我们手动调用 `Debug.waitForDebugger()` ，这样总算可以启动了，但是 AS 仍然无法识别进程。
 
 注意到普通 app 权限会打出这一条 log ：
 
@@ -259,7 +259,9 @@ exec /system/bin/app_process $java_options -Djava.class.path=./ash.apk -Dfive.ec
 
 https://github.com/RikkaApps/Sui/blob/352e70efc0c6d341aeec7b3e76b36a55f4cbacf2/module/src/main/java/rikka/sui/server/SuiUserServiceManager.java
 
-设置成包名后：
+看上去需要把这个所谓的 「DdmHandleAppName」 设置成包名，才能和 AS 打开的项目联动。
+
+设置成包名后，已经可以进入，但是报了另一个错误：
 
 ![](res/images/20220718_05.png)
 
@@ -304,3 +306,56 @@ See native debugger requirements at: https://developer.android.com/studio/debug#
 ```
 
 没想到竟然是没有 root …… 估计 AS 内部用了 adb root 
+
+于是尝试了 sui 的 adb root 功能，方法是 `touch /data/adb/sui/enable_adb_root(_once)` ，然后重启（once 表示仅开启一次）
+
+![](res/images/20220719_01.png)
+
+这样 `adb root` 可以成功进入 root 了，并且运行在 magisk context 下，但是 attach native 仍然有问题：
+
+![](res/images/20220719_02.png)
+
+```sh
+$ adb shell cat /data/local/tmp/lldb-server | sh -c 'cat > /data/data/five.ec1cff.ash/lldb/bin/lldb-server && chmod 700 /data/data/five.ec1cff.ash/lldb/bin/lldb-server'
+$ adb shell cat /data/local/tmp/start_lldb_server.sh | sh -c 'cat > /data/data/five.ec1cff.ash/lldb/bin/start_lldb_server.sh && chmod 700 /data/data/five.ec1cff.ash/lldb/bin/start_lldb_server.sh'
+Starting LLDB server: /data/data/five.ec1cff.ash/lldb/bin/start_lldb_server.sh /data/data/five.ec1cff.ash/lldb unix-abstract /five.ec1cff.ash-0 platform-1658198651263.sock "lldb process:gdb-remote packets"
+failed to get reply to handshake packet
+```
+
+原来是调试器把目标当成 app 处理了，直接在 `/data/data` 下建目录去了 …… 看起来距离能用还有很长的路要走。
+
+手动创建了这个目录，总算 attach 上了：
+
+![](res/images/20220719_03.png)
+
+不过 native 调试似乎不认识 `Debug.waitForDebugger` ，也许 dual 模式就认识了？
+
+## 让 AS 识别需要调试的进程  
+
+从上面的实验来看，一定要调用 `DdmHandleAppName.setName` 才能让 as 认出我们的待调试进程，并且必须是 root 。简单搜了一下代码发现，这玩意最终会和 `@jdwp-control` socket 通信，获得一个 agent socket 。普通 app 没有权限连接，需要调试的 app 可能是在 zygote 降权之前建立连接的。
+
+## 修改 AS ？  
+
+首先根据上面 stacktrace 的类名 `com.android.tools.ndk.run.lldb.ConnectLLDBTask` 试图用 cs 在 android studio 仓库里面搜索源码，但是一无所获。
+
+在 AS 的 plugin 目录看到了 android-ndk （`%ProgramFiles%\Android\Android Studio\plugins\android-ndk\lib`），jadx 打开一看正是这个 plugin ，名字是 `com.android.tools.ndk` 。
+
+在 cs 中搜索 `android-ndk` 只发现了这个：
+
+![](res/images/20220719_04.png)
+
+看起来位于仓库 `platform/tools/vendor` 下，然而在 android.googlesource.com 看不到这个仓库，看起来是没有开源。
+
+考察 pediy 那个修改方案，似乎也是拿这个 android-ndk.jar 和自己写的代码编译链接一下，替换掉原插件的逻辑，不过不知道会不会有签名校验。
+
+……
+
+## JDWP
+
+JDWP 是一个运行在 adbd 的服务，提供了 unix socket `@jdwp-control`
+
+源码：`packages/modules/adb/daemon/jdwp_service.cpp`
+
+可以使用 `adb jdwp` 获取可调试进程的 pid ，并通过 `adb forward tcp: jdwp:<pid>` 与其交互。
+
+[Android 调试原理 - 掘金](https://juejin.cn/post/6887395385589907469)
