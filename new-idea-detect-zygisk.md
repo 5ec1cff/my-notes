@@ -112,6 +112,8 @@ DEF_WEAK(unsetenv);
 
 解决方法是主动将其填 0 ，在随后发布的 shamiko 就解决了这一点，此时栈内存已经不存在 magisk 修改的 env 了。
 
+不过这样似乎还没有完全「隐藏」，考虑 env 在 stack 中的分布，也许我们还要把 env 整体向下移动到合适的位置，才像是「无修改」。
+
 ## 内核 execve 设置程序 stack  
 
 [common/fs/exec.c](https://android.googlesource.com/kernel/common/+/7d5fc93e8cc467ca63af9d75bdd5973958f5d5c8/fs/exec.c)
@@ -171,4 +173,4 @@ filename
 (8 bytes zero)
 ```
 
-filename 是 execve 传入的实际执行文件名，对于 execveat ，会产生 `/dev/fd/xxx` 的路径。尽管看上去我们传入了 `/system/bin/app_process` 的 argv ，但实际上 fexecve 的痕迹还是存在的。因此我认为 zygisk 在启动 zygote 时应该 umount app_process 再 execve 原程序。
+filename 是 execve 的可执行文件路径参数，并非 `argv[0]`，对于 execveat ，这个路径是 `/dev/fd/xxx` 。尽管看上去我们传入了 `/system/bin/app_process` 的 argv ，但实际上 fexecve 的痕迹还是存在的，检测该字符串即可发现异常。因此，为了使隐藏更保险，zygisk 或许该在启动 zygote 时 umount 之前挂载的 app_process ，再通过这个路径 execve 原程序？
