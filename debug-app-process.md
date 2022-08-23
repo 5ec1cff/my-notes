@@ -94,6 +94,12 @@ Shizuku 的用户服务也是 app_process ，和 Shizuku 服务本体一样通�
 
 > Sui 的[启动](https://github.com/RikkaApps/Sui/blob/352e70efc0c6d341aeec7b3e76b36a55f4cbacf2/module/src/main/cpp/util/app_process.cpp#L57)中也有类似的逻辑，参数是一模一样的，只不过是 C++ 写的，这里就不展示了。
 
+## libsu
+
+Magisk 作者的 root 支持库 libsu 中也有 Root Service 功能，其中也包含了对 root 进程调试的支持。
+
+[RootServiceManager.java](https://github.com/topjohnwu/libsu/blob/02abb7b20434a423e63aea5eebdbc6a15033ee0d/service/src/main/java/com/topjohnwu/superuser/internal/RootServiceManager.java#L81)
+
 ## 分析
 
 我们首先观察到，对于较低版本的 android 多采用这两种参数启动调试：
@@ -359,3 +365,34 @@ JDWP 是一个运行在 adbd 的服务，提供了 unix socket `@jdwp-control`
 可以使用 `adb jdwp` 获取可调试进程的 pid ，并通过 `adb forward tcp: jdwp:<pid>` 与其交互。
 
 [Android 调试原理 - 掘金](https://juejin.cn/post/6887395385589907469)
+
+## `wrap.sh`
+
+偶然有一天在 [LSP 群](https://t.me/c/1414270883/65622)听佬们提到了这个玩意：
+
+[封装 Shell 脚本  |  Android NDK  |  Android Developers](https://developer.android.com/ndk/guides/wrap-script?hl=zh-cn#packaging_wrapsh)
+
+这是 API 27 引入的功能，在 debuggable 为 true 的包中的 lib 放入 `wrap.sh` ，即可开启 zygote 的隐藏功能：fork 进程后，直接 exec 这个 sh ，进而启动一个 app_process 进程。也就是说，这样的 app 进程是从 RuntimeInit 而非 ZygoteInit 启动的。
+
+而这个文档的下方就提到了如何为这样的进程开启调试——在 wrap.sh 中加入这样的代码：
+
+```sh
+#!/system/bin/sh
+
+cmd=$1
+shift
+
+os_version=$(getprop ro.build.version.sdk)
+
+if [ "$os_version" -eq "27" ]; then
+  cmd="$cmd -Xrunjdwp:transport=dt_android_adb,suspend=n,server=y -Xcompiler-option --debuggable $@"
+elif [ "$os_version" -eq "28" ]; then
+  cmd="$cmd -XjdwpProvider:adbconnection -XjdwpOptions:suspend=n,server=y -Xcompiler-option --debuggable $@"
+else
+  cmd="$cmd -XjdwpProvider:adbconnection -XjdwpOptions:suspend=n,server=y $@"
+fi
+
+exec $cmd
+```
+
+和 LSPosed 的一模一样……看来最初是从这里来的。
