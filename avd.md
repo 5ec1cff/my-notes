@@ -21,7 +21,7 @@
 
 发现被一个叫做 livelock 的东西给杀了。
 
-[Android Live-LocK 守护程序 (llkd)  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/devices/architecture/kernel/llkd#coverage)
+[Android Live-LocK 守护程序 (llkd)](https://source.android.com/devices/architecture/kernel/llkd#coverage)
 
 根据文档所说，有一个设置免杀（黑名单）的属性 `ro.llk.blacklist.process` ，于是尝试 `resetprop ro.llk.blacklist.process lspd`
 
