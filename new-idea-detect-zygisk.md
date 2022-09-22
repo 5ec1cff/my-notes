@@ -174,3 +174,46 @@ filename
 ```
 
 filename 是 execve 的可执行文件路径参数，并非 `argv[0]`，对于 execveat ，这个路径是 `/dev/fd/xxx` 。尽管看上去我们传入了 `/system/bin/app_process` 的 argv ，但实际上 fexecve 的痕迹还是存在的，检测该字符串即可发现异常。因此，为了使隐藏更保险，zygisk 或许该在启动 zygote 时 umount 之前挂载的 app_process ，再通过这个路径 execve 原程序？
+
+## `/proc/self/attr/prev`
+
+[proc(5) - Linux manual page](https://man7.org/linux/man-pages/man5/proc.5.html)
+
+这个文件用于指示 exec 前的 selinux label ，正常来说 zygote 是从 `u:r:init:s0` exec 出来的，然而在 magisk 加了一层包装后就变成了 `u:r:zygote:s0` 。由于 zygote 到 app 进程并未经过 exec ，因此这个 prev 自然被保留了下来，因此可以根据这点说明 zygote 遭到了修改。
+
+不过最强检测器似乎没有利用这一特性，自己写了个简单的 wrapper 验证了一下，并没有检测到 zygote 被注入（看起来真正起作用的都是些我不懂的内存扫描魔法了）
+
+```cpp
+#include <unistd.h>
+#include <sys/mount.h>
+#include <android/log.h>
+#include <cstring>
+#include <cerrno>
+#include <cstdlib>
+
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "exec_wrapper", __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "exec_wrapper", __VA_ARGS__)
+
+int main(int argc, char **argv) {
+    LOGD("exec wrapper start");
+    char buf[256];
+    memset(buf, 0, sizeof(buf));
+    if (readlink("/proc/self/exe", buf, sizeof(buf)) < 0) {
+        LOGE("stat:%s", strerror(errno));
+        exit(-1);
+    }
+    LOGD("exe:%s", buf);
+    if (umount2(buf, MNT_DETACH)) {
+        LOGE("umount:%s", strerror(errno));
+        exit(-1);
+    }
+    if (execve(argv[0], argv, environ)) {
+        LOGE("execve:%s", strerror(errno));
+    }
+    return -1;
+}
+```
+
+实际上正常 android 的 zygote 在 selinux 规则中是不带 umount 权限的，因此需要修改 selinux 规则，此处直接借用了 magisk 规则， `magiskpolicy --magisk` 。
+
+另外，如果直接 bind mount /data 下的 wrapper 到 app_process ，init 是无法执行的，看日志似乎报了个 `nosuid_transition` 和一个 `execute_no_trans` 。解决方法是 mount 一个 tmpfs ，在这里面有 suid ，把 wrapper 放在这里再 bind mount ，执行成功。一开始不能理解，因为看 magisk 的内置规则也没有给 execute_no_trans 权限，不过考虑前一个 denied 原因，可以猜测其中的原因：是 data 的挂载参数中的 nosuid 惹的祸，无法 suid 就无法改变 selinux label ，只好 fallback (?)到 execute_no_trans ，而这也是 selinux 规则不允许的。这下总算理解为什么 magisk 要把包装放在 tmpfs 里面了。

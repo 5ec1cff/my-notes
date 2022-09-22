@@ -104,3 +104,140 @@ loader 中连接 magiskd socket 请求 mount ，这里也采用了 patch 方法�
 ## 感想
 
 Android.mk 的项目写起来真的不方便，因为 AS 不提供语言支持（~~会不会是有能用的 IDE 我不知道呢~~）。所有的语法问题都只能等编译才能发现。并且这个构建系统似乎 native 部分不是增量构建，每次都要重新编译，所以开发周期被大大地延长了（毕竟我脱离了强大 IDE 的支持写代码就寸步难行了）。总之，开发 magisk 十分考验功底，很难不佩服创造者 wu 和其他 magisk 的开发者。
+
+## ……
+
+## 第二次终极尝试：解决 attr prev 的问题？  
+
+最近又发现了 `/proc/self/attr/current` 可能暴露 zygisk 的存在（正常是 `u:r:init:s0` ，zygisk wrapper 后变成 `u:r:zygote:s0`），于是尝试解决，然而并不顺利。
+
+一开始的想法是：app_process label 换成 magisk_file ，然后 init 执行直接变成 magisk domain ，在这里就可以随心所欲了，并且我们可以稍后设置成 `u:r:init:s0` ，然后再 exec 原始 app_process 变成 zygote ，看上去天衣无缝。
+
+结果 init 根本拒绝执行，给了个这样的 log ： `has incorrect label or no domain transition`
+
+搜了一下发现源码在这里：`system/core/init/service.cpp` 的 `ComputeContextFromExecutable` 函数，会主动计算 init exec 的新进程的 domain ，如果 domain 不发生改变就会报这个错……
+
+我们知道 magiskd 自己就是从 init 出来的，那它怎么没问题呢？原来 magiskd 显式声明了自己的 selinux label:
+
+```cpp
+// native/src/init/magiskrc.inc
+"service %2$s %1$s/magisk --post-fs-data\n"
+"    user root\n"
+"    seclabel u:r:" SEPOL_PROC_DOMAIN ":s0\n"
+"    oneshot\n"
+"\n"
+```
+
+好吧，那就先让 magisk_file 被 init 执行 transition 成 magisk domain ：
+
+```cpp
+// native/src/sepolicy/rules.cpp
+type_transition("init", SEPOL_FILE_TYPE, "process", SEPOL_PROC_DOMAIN);
+```
+
+然而 magisk 又被自己绊了一脚：magiskd 处理 zygisk socket 请求只认 zygote label ，magisk 自己的 label 被无情地拒绝了。
+
+```cpp
+    if (setcon("u:r:" SEPOL_PROC_DOMAIN ":s0")) {
+        LOGE("FIVEC: failed to setcon to magisk");
+    }
+
+    if (int socket = zygisk_request(ZygiskRequest::SETUP); socket >= 0) {
+        do {
+            // ....
+
+            if (setcon("u:r:init:s0")) {
+                LOGE("FIVEC: failed to setcon to init");
+            }
+
+            if (execve(buf, argv, environ)) {
+                LOGE("FIVEC:failed to exec %d %s", errno, strerror(errno));
+                break;
+            }
+        } while (false);
+        write_int(socket, 0);
+        close(socket);
+    }
+```
+
+这个好改，我们在鉴权部分允许 magisk context 即可，并且不能移除 zygote ，因为将来 zygisk 注入进去还要用。
+
+这下总算可以了吧！结果 zygote 确实正常启动了，attr prev 的痕迹也被抹除，然而根本无法启动系统，system_server 吐出了大量错误：
+
+```log
+09-22 13:14:33.904  3497  3528 E ActivityManager: Failure starting process com.android.permissioncontroller
+09-22 13:14:33.904  3497  3528 E ActivityManager: java.lang.RuntimeException: Starting VM process through Zygote failed
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.start(ZygoteProcess.java:381)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.Process.start(Process.java:679)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at com.android.server.am.ProcessList.startProcess(ProcessList.java:2396)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at com.android.server.am.ProcessList.handleProcessStart(ProcessList.java:2149)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at com.android.server.am.ProcessList.lambda$startProcessLocked$0$ProcessList(ProcessList.java:2076)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at com.android.server.am.ProcessList$$ExternalSyntheticLambda1.run(Unknown Source:22)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.Handler.handleCallback(Handler.java:938)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.Handler.dispatchMessage(Handler.java:99)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.Looper.loopOnce(Looper.java:201)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.Looper.loop(Looper.java:288)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.HandlerThread.run(HandlerThread.java:67)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at com.android.server.ServiceThread.run(ServiceThread.java:44)
+09-22 13:14:33.904  3497  3528 E ActivityManager: Caused by: android.os.ZygoteStartFailedEx: Error connecting to zygote
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.openZygoteSocketIfNeeded(ZygoteProcess.java:1093)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.startViaZygote(ZygoteProcess.java:787)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.start(ZygoteProcess.java:372)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       ... 11 more
+09-22 13:14:33.904  3497  3528 E ActivityManager: Caused by: java.io.IOException: Permission denied
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.net.LocalSocketImpl.connectLocal(Native Method)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.net.LocalSocketImpl.connect(LocalSocketImpl.java:259)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.net.LocalSocket.connect(LocalSocket.java:148)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess$ZygoteState.connect(ZygoteProcess.java:201)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.attemptConnectionToPrimaryZygote(ZygoteProcess.java:1047)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       at android.os.ZygoteProcess.openZygoteSocketIfNeeded(ZygoteProcess.java:1078)
+09-22 13:14:33.904  3497  3528 E ActivityManager:       ... 13 more
+```
+
+看起来我们的 zygote socket 无法被连接，难道让 init 是计算出了 magisk 的 domain 导致出了问题？
+
+检查了 `/dev/socket/zygote` ，发现 label 是对的。
+
+继续看 init 源码，发现计算出来的 label 被传到了 CreateSocket 里面：
+
+```cpp
+// system/core/init/util.cpp
+Result<int> CreateSocket(const std::string& name, int type, bool passcred, bool should_listen,
+                         mode_t perm, uid_t uid, gid_t gid, const std::string& socketcon) {
+    if (!socketcon.empty()) {
+        if (setsockcreatecon(socketcon.c_str()) == -1) {
+            return ErrnoError() << "setsockcreatecon(\"" << socketcon << "\") failed";
+        }
+    }
+
+    android::base::unique_fd fd(socket(PF_UNIX, type, 0));
+    if (fd < 0) {
+        return ErrnoError() << "Failed to open socket '" << name << "'";
+    }
+
+    if (!socketcon.empty()) setsockcreatecon(nullptr);
+    // ...
+}
+```
+
+这个 `setsockcreatecon` 内部大概是写入了 `/proc/self/attr/socketcreate` 。
+
+看起来这导致了创建出来的 socket 是 magisk 的 domain ，从而无法被 system_server 连接……
+
+于是临时想了个解决办法：允许系统服务读 magisk socket 。
+
+```cpp
+allow("system_server", SEPOL_PROC_DOMAIN, "unix_stream_socket", ALL);
+```
+
+引入了两个恐怖的规则，系统总算可以启动了，然而……
+
+![](res/images/20220922_01.png)
+
+…… zygisk 没了
+
+仔细一想，exec 后 selinux domain 从 init 变成 zygote 这个过程算是权限转换，所以必然有 AT_SECURE ，因此 LD_PRELOAD 就被忽略掉了……
+
+## 全 部 木 大
+
+看起来 zygisk 的工作机制（无论是 exec wrapper 还是 ld_preload）确实导致了更多的痕迹，检测起来比 riru 更加容易。**或许该考虑一下用 native bridge 加载 zygisk 了？**
