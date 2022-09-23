@@ -338,7 +338,12 @@ failed to get reply to handshake packet
 
 ## 让 AS 识别需要调试的进程  
 
-从上面的实验来看，一定要调用 `DdmHandleAppName.setName` 才能让 as 认出我们的待调试进程，并且必须是 root 。简单搜了一下代码发现，这玩意最终会和 `@jdwp-control` socket 通信，获得一个 agent socket 。普通 app 没有权限连接，需要调试的 app 可能是在 zygote 降权之前建立连接的。
+从上面的实验来看，不仅要配置 app_process 的 jdwp 参数，而且还要调用 `DdmHandleAppName.setName` ，才能让 AS 认出我们的待调试进程（并且似乎只有 root 进程才生效？）。简单搜了一下代码发现，这玩意最终会和 `@jdwp-control` socket 通信，获得一个 agent socket 。~~普通 app 没有权限连接，需要调试的 app 可能是在 zygote 降权之前建立连接的~~。
+
+> 2022.09.23 修正：实际上 appdomain 可以连接 `jdwp-control` ，dump selinux 规则如下：  
+> `allow appdomain adbd : unix_stream_socket { ioctl read write getattr getopt shutdown connectto } ;`  
+> 连接 jdwp 的工作在 `ZygoteHooks.callPostForkChildHooks` 执行，对于 debuggable 的进程，会创建一个进程维护 jdwp 的连接（确保 adbd 重启后 app 进程不需要重启仍然可以调试，参考代码：`packages/modules/adb/libs/adbconnection/adbconnection_client.cpp` ）
+> 至于为何 app 权限的 app_process 无法启动调试还有待研究。  
 
 ## 修改 AS ？  
 
@@ -396,3 +401,25 @@ exec $cmd
 ```
 
 和 LSPosed 的一模一样……看来最初是从这里来的。
+
+## Sui adbd root 功能导致无法调试 app ？
+
+之前尝试了在 adbd root 下调试 app ，主要是 App Inspector 功能在非 root 下似乎会调用 magisk 的 su ，并且频繁使用 `adb shell su` ，产生了大量 toast ，要是换成 adbd root 或许就不会这样了。然而实际用起来却发现 adbd root 下 AS 根本找不到 debuggable 的进程，只好作罢。
+
+最近研究 selinux 规则，突然想到，这会不会是因为 adbd root 运行在 magisk domain ，而 [magisk 从 v21 引入的规则](https://github.com/topjohnwu/Magisk/commit/97b72a5941828b13839495d29c0d9138931a6598)限制了 appdomain 连接 magisk domain 的 socket （对 API 26 及以上有效）。而 jdwp-control 是 adbd 启动并降权（对于 adbd root 就是提权）后才创建的，创建的 socket 属于 magisk domain ，而上面的分析表明 app 是降权后才连接 jdwp ，因此会被拒绝连接。
+
+下面是 adbd root 前后在 app domain 连接 magisk socket 和 jdwp 的表现：
+
+root 前：
+
+![](res/images/20220923_01.png)
+
+root 后：
+
+![](res/images/20220923_02.png)
+
+> socktype=5 是因为 jdwp 实际上是 `SOCK_SEQPACKET` 类型，不过在 selinux 看来和 `SOCK_STREAM` 一样都属于 `unix_stream_socket`
+
+> 我为了截这个图重启了手机，因为在这之前发现 adbd root 下 AS 又可以找到 debuggable 的 app ，并且 app domain 可以连接到 magisk domain 的 socket 。重启后才恢复正常表现，怀疑是以前启动过 frida 之类的东西导致修改了规则。
+
+提出一个解决思路：adbd root 提权(`setcon`)之后，将 `u:r:adbd:s0` 写入 `/proc/self/attr/sockcreate` ，确保 adbd 创建的 socket 属于 adbd domain 。既然 Sui 通过 ld_preload 注入，替换个 setcon 应该挺方便的。
