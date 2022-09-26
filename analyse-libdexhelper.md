@@ -258,7 +258,7 @@ ghidra 看起来能分析出 elf 的符号，但是竟然反编译不出来。
 
 看上去，section header 和 program header 都引导我们到了一个假的动态段，那么真正的动态段的文件偏移是怎么来的呢？
 
-分析 linker 源码发现，实际上只有 LOAD 段的文件偏移是有用的，而 DYNAMIC 段的 vaddr 就相对已 load 的部分的 vaddr ，也就是说，它的文件偏移可以不正确。
+分析 linker 源码发现，实际上只有 LOAD 段的文件偏移是有用的，而寻找 DYNAMIC 段实际上用的是 vaddr 的地址，在已经 load 的段中寻找（bias + vaddr）。也就是说，**DYNAMIC 段的文件 offset 可以不正确，只要 vaddr 正确即可**。
 
 ```
   Type           Offset             VirtAddr           PhysAddr

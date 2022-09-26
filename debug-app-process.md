@@ -408,7 +408,16 @@ exec $cmd
 
 最近研究 selinux 规则，突然想到，这会不会是因为 adbd root 运行在 magisk domain ，而 [magisk 从 v21 引入的规则](https://github.com/topjohnwu/Magisk/commit/97b72a5941828b13839495d29c0d9138931a6598)限制了 appdomain 连接 magisk domain 的 socket （对 API 26 及以上有效）。而 jdwp-control 是 adbd 启动并降权（对于 adbd root 就是提权）后才创建的，创建的 socket 属于 magisk domain ，而上面的分析表明 app 是降权后才连接 jdwp ，因此会被拒绝连接。
 
+![](res/images/20220924_01.png)
+
 下面是 adbd root 前后在 app domain 连接 magisk socket 和 jdwp 的表现：
+
+```
+socat abstract-connect:${magisk_socket} -
+socat abstract-connect:jdwp-control,socktype=5 -
+```
+
+> socktype=5 是因为 jdwp 实际上是 `SOCK_SEQPACKET` 类型，不过在 selinux 看来和 `SOCK_STREAM` 一样都属于 `unix_stream_socket`
 
 root 前：
 
@@ -418,8 +427,10 @@ root 后：
 
 ![](res/images/20220923_02.png)
 
-> socktype=5 是因为 jdwp 实际上是 `SOCK_SEQPACKET` 类型，不过在 selinux 看来和 `SOCK_STREAM` 一样都属于 `unix_stream_socket`
-
 > 我为了截这个图重启了手机，因为在这之前发现 adbd root 下 AS 又可以找到 debuggable 的 app ，并且 app domain 可以连接到 magisk domain 的 socket 。重启后才恢复正常表现，怀疑是以前启动过 frida 之类的东西导致修改了规则。
 
 提出一个解决思路：adbd root 提权(`setcon`)之后，将 `u:r:adbd:s0` 写入 `/proc/self/attr/sockcreate` ，确保 adbd 创建的 socket 属于 adbd domain 。既然 Sui 通过 ld_preload 注入，替换个 setcon 应该挺方便的。
+
+给原项目提了个 issue （因为不敢 PR）：
+
+[adbd root 无法调试 App · Issue #42 · RikkaApps/Sui](https://github.com/RikkaApps/Sui/issues/42)
