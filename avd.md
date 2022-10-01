@@ -90,3 +90,20 @@ adb shell sh /data/local/tmp/avd_magisk.sh
 打开 avd ，执行 `avd.bat` 。完成后 avd 会软重启，并且直接启动 magisk 的 post-fs-data 和 service 。此时就可以愉快地用 magisk 了。如果要开启 zygisk ，应该在 app 打开开关后，再次执行 `avd.bat` 。安装模块后的重启也应该执行这个脚本。如果只是需要 zygote 重启的话，也可以在 adb shell 中 `stop;start` 。
 
 用这样的方法调试了几次模块，总的来说还是非常方便的，也没有像 patch 方法要考虑 magisk 升级的麻烦。
+
+## 冷启动
+
+调试的时候经常搞坏系统。比如：
+
+1. 之前调试 sui 的时候把 adbd 杀了，却没有被 init 自动拉起  
+2. magisk 模块导致 zygote bootloop ，**stop 之后在这个阶段安装模块**会导致诡异的情况——执行任何程序都会提示 not found （包括 sh），至今没找明白原因。  
+
+这种情况下就需要彻底关闭系统，然而 AVD 的 UI 甚至没有强制重启的选项，并且由于 AVD 有快照功能，直接关闭的话，下次启动又恢复上次坏掉的系统。
+
+虽然确实有冷启动的方法，不过我总是记不住，现在记在下面：
+
+启动的时候添加这个参数：
+
+```
+    -no-snapshot                                                        perform a full boot and do not auto-save, but qemu vmload and vmsave operate on snapstorage
+```

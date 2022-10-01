@@ -905,6 +905,355 @@ int wait_for_file(const char* filename, std::chrono::nanoseconds timeout) {
 
 如果像 magisk 的其他 bin 一样放在 /data/adb ，需要大量修改（构建脚本、安装脚本……）。
 
-如果像原来一样把 zygisk-ld 存在 magisk 里面，需要少量修改（构建脚本）。但是 magisk 内要包含所有架构的 zygisk-ld 。
+如果像原来一样把 zygisk-ld 存在 magisk 里面，那么挂载 zygisk loader 也麻烦。但是 magisk 内要包含所有架构的 zygisk-ld 。
 
 此外直接存在 magisk 里面，也要考虑容易被内存扫描到的问题（如果要模仿 riru 行为，不卸载模块而隐藏的情况下）
+
+……
+
+既然是修改代码，那么还是一步一步来，zygisk-ld 先不动，仍然存放在 magisk 里面，然后在 magic mount 增加注入 zygisk lib 的逻辑，把 zygisk-ld 和 magisk 作为 libzygisk 作为内建模块挂载到 `/system/lib(64)` 上。
+
+而 zygisk-ld 就直接从 magisk 中释放出来，具体方法是 main 增加一个入口，然后 write zygisk_ld 到指定路径，这样需要我们在 magiskd exec 执行 magisk64 和 magisk32 。
+
+此外入口放在了 zygisk_main ，这又是一个大坑，因为 zygisk main 必须要 argv0 为空才能进入，而基础设施里面没有直接执行的方法（唯一用到的地方是 zygiskd ，在这里有 exec 的实现，但是没封装），只好自己造了。
+
+#### Riru 方案的大坑
+
+上面分析到 zygisk 原来的 hook setArgv0 作为跳板 hook onVmCreated 的方法不适用，因此采用 Riru 方案，使用 `setTableOverride` hook JNI 函数，然而实际尝试却发现是一个大坑。
+
+现在已经完成了 zygisk-ld 的注入和 zygisk 的加载，然而到了 jni hook 阶段就崩溃了，tombstone 如下：
+
+```java
+*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+Build fingerprint: 'Android/sdk_phone64_x86_64/emulator64_x86_64:12/SE1A.220203.002.A1/8151367:userdebug/test-keys'
+Revision: '0'
+ABI: 'x86_64'
+Timestamp: 2022-09-29 13:39:36.498325900+0000
+Process uptime: 0s
+Cmdline: zygote64
+pid: 23900, tid: 23900, name: main  >>> zygote64 <<<
+uid: 0
+signal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------
+Abort message: 'JNI DETECTED ERROR IN APPLICATION: java_class == null
+    in call to AllocObject
+    from java.lang.Object java.lang.Throwable.nativeFillInStackTrace()'
+    rax 0000000000000000  rbx 0000000000005d5c  rcx 000076bfa40c85cf  rdx 0000000000000006
+    r8  000076bd2d6bed51  r9  000076bd2d6bed51  r10 00007fff98fce760  r11 0000000000000217
+    r12 000000000000000b  r13 0000000000000001  r14 00007fff98fce758  r15 0000000000005d5c
+    rdi 0000000000005d5c  rsi 0000000000005d5c
+    rbp 000076bdcd6a7870  rsp 00007fff98fce750  rip 000076bfa40c85cf
+
+
+09-29 13:39:34.805 23900 23900 E linker  : "/system/lib64/libzygisk.so": ignoring DT_PREINIT_ARRAY in shared library!
+09-29 13:39:34.806 23900 23900 D Magisk  : zygisk64: load success
+09-29 13:39:34.818 23900 23900 D Magisk  : zygisk64: jniRegisterNativeMethods not hooked, using fallback
+09-29 13:39:34.818 23900 23900 D Magisk  : found: 76bd08c00000-76bd08d7b000 r--p 00000000 fe:0f 57                         /apex/com.android.art/lib64/libart.so
+09-29 13:39:34.819 23900 23900 D Magisk  : update path: /apex/com.android.art/lib64/libart.so
+09-29 13:39:34.819 23900 23900 D Magisk  : get module base /apex/com.android.art/lib64/libart.so: 76bd08c00000
+09-29 13:39:34.829 23900 23900 D Magisk  : found _ZN3art21GetJniNativeInterfaceEv 0x62a0c0 in /apex/com.android.art/lib64/libart.so in dynsym by gnuhash
+09-29 13:39:34.829 23900 23900 D Magisk  : found _ZN3art9JNIEnvExt16SetTableOverrideEPK18JNINativeInterface 0x624900 in /apex/com.android.art/lib64/libart.so in dynsym by gnuhash
+09-29 13:39:34.829 23900 23900 D Magisk  : zygisk64: override table installed
+09-29 13:39:34.834 23900 23900 W nativebridge: Unsupported native bridge API in libzygisk-ld.so (is version 0 not compatible with 3)
+09-29 13:39:34.846 23900 23900 E zygote64: No implementation found for java.lang.String java.lang.Class.getNameNative() (tried Java_java_lang_Class_getNameNative and Java_java_lang_Class_getNameNative__)
+09-29 13:39:34.847 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.848 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.848 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.848 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.848 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.849 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.849 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.849 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.849 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+09-29 13:39:34.851 23900 23900 E zygote64: No implementation found for java.lang.Object java.lang.Throwable.nativeFillInStackTrace() (tried Java_java_lang_Throwable_nativeFillInStackTrace and Java_java_lang_Throwable_nativeFillInStackTrace__)
+```
+
+看报错，一开始是 `Class.getName` 的 native 方法找不到，而下面是一长串的 `nativeFillInStackTrace` 未注册。
+
+检查 Zygisk 代码，发现是有一个 `get_class_name` 函数，每次注册 native methods 的时候都会根据传入的 jclass 获取 class name ，而获取方法正是 jni 反射调用 Class.getName 。
+
+为什么要用 Class.getName ？因为 JNI 似乎没有直接获取 jclass 的类名的方法……（jclass 本质还是 jobject ，是一个 Class 对象）
+
+看上去我们 hook RegisterNative ，首次调用的时候 Class.getName 甚至还没注册， `Throwable.nativeFillInStackTrace` 也没有注册，导致 jni 调用的过程中出现异常。
+
+但是我们都是替换了 env RegisterNatives ，为什么 zygisk 原来的实现没问题呢？
+
+注意到原来的实现中，hook RegisterNative 发生在 onVmCreated ，因为只有这时候才能拿到 JNIEnv 。而我们现在的 hook 发生在 Runtime::Init 调用还未结束的时候。
+
+看一看 Java 基础库的方法什么时候 register 的：
+
+```cpp
+// art/runtime/native/java_lang_Class.cc
+void register_java_lang_Class(JNIEnv* env) {
+  REGISTER_NATIVE_METHODS("java/lang/Class");
+}
+
+// art/runtime/native/native_util.h
+#define REGISTER_NATIVE_METHODS(jni_class_name) \
+  RegisterNativeMethodsInternal(env, (jni_class_name), gMethods, arraysize(gMethods))
+
+ALWAYS_INLINE inline void RegisterNativeMethodsInternal(JNIEnv* env,
+                                                        const char* jni_class_name,
+                                                        const JNINativeMethod* methods,
+                                                        jint method_count) {
+  ScopedLocalRef<jclass> c(env, env->FindClass(jni_class_name));
+  if (c.get() == nullptr) {
+    LOG(FATAL) << "Couldn't find class: " << jni_class_name;
+  }
+  jint jni_result = env->RegisterNatives(c.get(), methods, method_count);
+  CHECK_EQ(JNI_OK, jni_result);
+}
+
+
+
+// art/runtime/runtime.cc
+void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
+  register_dalvik_system_DexFile(env);
+  register_dalvik_system_BaseDexClassLoader(env);
+  register_dalvik_system_VMDebug(env);
+  register_dalvik_system_VMRuntime(env);
+  register_dalvik_system_VMStack(env);
+  register_dalvik_system_ZygoteHooks(env);
+  register_java_lang_Class(env);
+  register_java_lang_Object(env);
+  // ...
+}
+
+void Runtime::InitNativeMethods() {
+  VLOG(startup) << "Runtime::InitNativeMethods entering";
+  Thread* self = Thread::Current();
+  JNIEnv* env = self->GetJniEnv();
+
+  // Must be in the kNative state for calling native methods (JNI_OnLoad code).
+  CHECK_EQ(self->GetState(), ThreadState::kNative);
+
+  // Set up the native methods provided by the runtime itself.
+  RegisterRuntimeNativeMethods(env);
+
+  // Initialize classes used in JNI. The initialization requires runtime native
+  // methods to be loaded first.
+  WellKnownClasses::Init(env);
+  // ...
+}
+```
+
+发生在 `Runtime::InitNativeMethods` ，这个方法又被 `Runtime::Start` 调用，发生在 Init 之后，也就是 loadNativeBridge 之后。当然，发生在 onVmCreated 之前。
+
+那么 Riru 为什么也没事呢？因为 Riru 并不用这个方法判断是 Zygote 的类注册，它获取了一个 Zygote class 的全局引用，然后比对传入的 jclass 和这个全局引用是不是一个对象。
+
+而 Zygisk 需要提供 hook jni RegisterNative 的 API ，因此必须收集所有注册的类名和方法，并保存在一个 map 里面，所以导致了这样的问题。
+
+最后的解决方案，仍然采用了替换虚表的方法，此时不能再通过 setArgv0 拿到 this 了，但 AndroidRuntime 已经创建，我们可以通过 `AndroidRuntime::getRuntime` 拿到当前的 this ，同样可以替换虚表。
+
+## 解决 Momo 的「Zygote 被注入」
+
+目前基于 native bridge 的 zygisk 在开启了排除列表的情况下，在 Momo 4.4.1 不会报「找到 Zygisk」，但仍然会被发现「Zygote 被注入」
+
+尝试从 native bridge 入手：
+
+1. 设置 `ro.dalvik.vm.native.bridge` 为不存在的值，不报。  
+2. Riru ，报。  
+3. 用 native bridge 加载一个空实现的 so ，成功加载并卸载，不报。  
+4. 用 native bridge 加载一个 so ，在其中又 dlopen （不卸载），Android 12 不报（但是 momo 进程中确实加载了这个 so），Android 11 报。  
+
+> 但是用以前写的 native bridge + 二阶段加载，又报，无法理解。
+
+于是怀疑是卸载的时候被检测到了痕迹，我们来尝试一下卸载。
+
+### 自卸载？
+
+起初怀疑是 zygisk 自卸载的问题，于是研究了一下卸载。
+
+二阶段的 so 卸载相当麻烦，不像一阶段的 loader ，如果是 native bridge 加载的，可以被系统卸载，但是我们自己 dlopen 的只能找个跳板来卸载。
+
+目前的实现一般是，dlopen 的时候给自己传自己的 handle ，等到要卸载的时候， pthread 创建一个线程，入口为 dlclose ，参数是自己的 handle ，然后想办法在 so 的 destructor 中 wait 一小段时间，确保二阶段 so 中代码全部执行完毕，这时候就可以被卸载了。
+
+我们希望在进入新进程的时候 dlclose ，那么必然要 hook ，我们自己写个模块来实验一下。
+
+由于自己的模块引入 JNI hook 不太方便，于是尝试了以下 hook 方案，均导致启动失败：
+
+#### selinux_android_setcontext 前：
+
+```
+09-30 11:48:14.740  7938  7938 I xhook   : map refreshed
+09-30 11:48:14.740  7938  7938 D maru64  : unhook success
+09-30 11:48:14.741  7938  7938 E SELinux : selinux_android_setcontext:  Error setting context for system server: Operation not permitted
+09-30 11:48:14.741  7938  7938 D maru64  : self unload unlock (holder destructor)
+09-30 11:48:14.742  7938  7938 F zygote64: jni_internal.cc:748] JNI FatalError called: (system_server) frameworks/base/core/jni/com_android_internal_os_Zygote.cpp:1763: selinux_android_setcontext(1000, 1, "(null)", "(null)") failed
+09-30 11:48:14.742  7938  7944 D maru64  : self unload lock (destructor)
+09-30 11:48:14.742  7938  7944 D maru64  : self unload
+```
+
+系统服务无法启动。
+
+#### fork 后：
+
+```
+09-30 12:01:40.892 11904 11904 E SELinux : selinux_android_setcontext:  Error setting context for app with uid 10073, seinfo default:privapp:targetSdkVersion=29:complete: Operation not permitted
+09-30 12:01:40.893 11904 11904 F zygote64: jni_internal.cc:748] JNI FatalError called: (com.android.dialer) frameworks/base/core/jni/com_android_internal_os_Zygote.cpp:1763: selinux_android_setcontext(10073, 0, "default:privapp:targetSdkVersion=29:complete", "com.android.dialer") failed
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669] Runtime aborting...
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669] Dumping all threads without mutator lock held
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669] All threads:
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669] DALVIK THREADS (1):
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669] "main" prio=5 tid=1 Runnable
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   | group="" sCount=0 ucsCount=0 flags=0 obj=0x724fa3d8 self=0x7622ad19ebe0
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   | sysTid=11039 nice=0 cgrp=default sched=0/0 handle=0x7623f57034f8
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=100
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   | stack=0x7ffe8734a000-0x7ffe8734c000 stackSize=8188KB
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   | held mutexes= "abort lock" "mutator lock"(shared held)
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   native: (backtrace::Unwind failed for thread 11039: Thread doesn't exist)
+09-30 12:01:40.902 11904 11904 F zygote64: runtime.cc:669]   at com.android.internal.os.Zygote.nativeSpecializeAppProcess(Native method)
+
+[ 1502.062461] type=1401 audit(1664539259.499:51): op=security_bounded_transition seresult=denied oldcontext=u:r:zygote:s0 newcontext=u:r:platform_app:s0:c512,c768
+```
+
+这回不是系统服务，似乎是其他系统 app 无法启动。
+
+#### selinux_android_setcontext 后：
+
+```
+emulator64_x86_64:/data/local/tmp # logcat --pid 14254
+--------- beginning of main
+09-30 12:14:30.508 14254 14254 D maru64  : self unload lock (holder constructor)
+09-30 12:14:30.509 14254 14254 D maru64  : start unload
+09-30 12:14:30.509 14254 14254 I xhook   : libxhook 1.2.0 (x86_64)
+09-30 12:14:30.510 14254 14254 I xhook   : init OK: /system/lib64/libandroid_runtime.so (RELA GNU_HASH PLT:59328 DYN:0 ANDROID:13507)
+09-30 12:14:30.510 14254 14254 I xhook   : hooking selinux_android_setcontext in /system/lib64/libandroid_runtime.so
+09-30 12:14:30.510 14254 14254 I xhook   : found selinux_android_setcontext at symidx: 2255 (GNU_HASH UNDEF)
+09-30 12:14:30.510 14254 14254 I xhook   : found selinux_android_setcontext at .rela.plt offset: 0x20bda8
+09-30 12:14:30.511 14254 14254 E xhook   : set addr prot failed. ret: 13
+09-30 12:14:30.511 14254 14254 E xhook   : replace function failed: selinux_android_setcontext at .rela.plt
+09-30 12:14:30.513 14254 14254 I xhook   : map refreshed
+09-30 12:14:30.513 14254 14254 D maru64  : unhook success
+09-30 12:14:30.513 14254 14254 D maru64  : self unload unlock (holder destructor)
+09-30 12:14:30.514 14254 14260 D maru64  : self unload lock (destructor)
+09-30 12:14:30.514 14254 14260 D maru64  : self unload
+09-30 12:14:30.507 14254 14254 W main    : type=1400 audit(0.0:81): avc: denied { use } for path="/system/lib64/libandroid_runtime.so" dev="dm-4" ino=1641 scontext=u:r:system_server_startup:s0 tcontext=u:r:zygote:s0 tclass=fd permissive=0
+09-30 12:14:30.515 14254 14254 F system_server: jni_internal.cc:748] JNI FatalError called: (system_server) frameworks/base/core/jni/com_android_internal_os_Zygote.cpp:1786: selinux_android_setcon(u:r:system_server:s0)
+09-30 12:14:30.519 14254 14254 W system_server: sched_getscheduler(14212): Permission denied
+09-30 12:14:30.519 14254 14254 W system_server: sched_getparam(14212, &sp): Permission denied
+09-30 12:14:30.520 14254 14254 W system_server: sched_getscheduler(14212): Permission denied
+09-30 12:14:30.520 14254 14254 W system_server: sched_getparam(14212, &sp): Permission denied
+09-30 12:14:30.515 14254 14254 W system_server: type=1400 audit(0.0:83): avc: denied { getsched } for scontext=u:r:system_server_startup:s0 tcontext=u:r:zygote:s0 tclass=process permissive=0
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669] Runtime aborting...
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669] Dumping all threads without mutator lock held
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669] All threads:
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669] DALVIK THREADS (1):
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669] "main" prio=5 tid=1 Runnable
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   | group="" sCount=0 ucsCount=0 flags=0 obj=0x7339aeb8 self=0x79b2a7cd67b0
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   | sysTid=14212 nice=0 cgrp=default sched=-1/-1 handle=0x79b3e79534f8
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=100
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   | stack=0x7ffd36cf2000-0x7ffd36cf4000 stackSize=8188KB
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   | held mutexes= "abort lock" "mutator lock"(shared held)
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   native: (backtrace::Unwind failed for thread 14212: Thread doesn't exist)
+09-30 12:14:30.523 14254 14254 F system_server: runtime.cc:669]   at com.android.internal.os.Zygote.nativeForkSystemServer(Native method)
+```
+
+还是系统服务无法启动。如果取消对 system_server 的 dlclose 就没问题。导致这个问题的原因似乎是 fork system_server 会两次调用 setcon （第一次进入 `u:r:system_server_startup:s0 ` ）。
+
+可以发现，最好在 setcon 前执行 unhook ，否则新的 context 可能无法修改内存页。Zygisk 的 unhook 就是在 setcon 之前的，setcon 一般也是最后被调用的。
+
+至于为何 setcon 前 unhook 和 dlclose 导致系统服务无法启动，怀疑可能是 dlclose 线程的存在导致的，因为我们在有特权的时候就创建了 dlclose 线程。Zygisk 的 dlclose 是发生在降权之后(specialize post)的。
+
+不过最终的方案是 selinux_android_setcontext 后，跳过对 system_server 的 unhook ，这样似乎也没有问题，起码系统可以启动。
+
+> `SelfUnloadGuard` 借鉴了 riru 的代码，利用 `pthread_mutex` ，在 destructor 和函数调用的时候都申请锁，可以确保在函数调用的时候不被卸载。
+
+```cpp
+int (*old_selinux_android_setcontext)(uid_t uid, int isSystemServer, const char *seinfo, const char *pkgname);
+
+static void unload_self() {
+    LOGD("start unload");
+    xhook_register(".*/libandroid_runtime.so$", "selinux_android_setcontext", reinterpret_cast<void*>(old_selinux_android_setcontext), nullptr);
+    if (xhook_refresh(0) == 0) {
+        xhook_clear();
+        LOGD("unhook success");
+    } else {
+        LOGE("unhook failed");
+    }
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    errno = pthread_create(&thread, &attr, reinterpret_cast<void *(*)(void *)>(dlclose), my_handle);
+    if (errno) {
+        PLOGE("pthread_create");
+    }
+}
+
+static int NewSelinuxAndroidSetcontext(uid_t uid, int is_system_server, const char *seinfo, const char *pkgname) {
+    int result = old_selinux_android_setcontext(uid, is_system_server, seinfo, pkgname);
+    if (!is_system_server) {
+        [[maybe_unused]] auto holder = self_unload_guard.hold();
+        unload_self();
+    }
+    return result;
+}
+
+extern "C" [[gnu::visibility("default")]] [[maybe_unused]]
+void Init(void *handle) {
+    my_handle = handle;
+    xhook_enable_debug(1);
+    LOGD("loaded in zygote!my handle=%p", handle);
+    xhook_register(".*/libandroid_runtime.so$", "selinux_android_setcontext",
+                   (void*)NewSelinuxAndroidSetcontext, (void**)&old_selinux_android_setcontext);
+    if (xhook_refresh(0) == 0) {
+        xhook_clear();
+        LOGD("hook success");
+    } else {
+        LOGE("hook failed");
+    }
+}
+```
+
+然而，自己写的模块的自卸载，得到的结果是不确定的，有时候有「zygote 被注入」，有时候没有。
+
+### hook 导致页权限改变？
+
+怀疑是这个原因，但是 xhook 的实现是：每次 hook 要写内存的时候，备份原先权限 -> 改成读写 -> 读旧值，写新值 -> 还原权限，因此不可能有问题。
+
+### 转机
+
+反复实验找到了这样的规律：
+
+1. 从未开启过 zygisk 的情况下，native bridge 注入的模块都不会导致汇报「注入 Zygote」。系统重启后，如果不再开启 zygisk ，也不会被检测到。  
+2. 只要曾开启过 zygisk ，那么如果关闭了 zygisk ，再重启 zygote （stop start 或者重新执行 magisk avd），则不管什么情况都会汇报注入。
+
+因此，导致被检测到的因素，必然是某些 **「系统重启不保留」而「zygote 重启保留」** 的特征。
+
+> 并且，在我常用的系统上用的是 zygisk + shamiko 的组合，目前已经无法阻止被 momo 「检测到 zygisk」，并且**在一段时间内**除了首次启动 momo 不会「汇报注入」，其他时候都会汇报。说明这个特征还具有时效性。
+
+### native bridge ？
+
+能够跨越重启保留的有 props ，但是之前用 riru 和自己写的 native bridge 测试注入都不会报这个的。
+
+上面和 props 有关的实验都表明 props 不是问题的关键所在。
+
+### 日志泄露？
+
+突然想到，能够跨 zygote 重启存在的，并且重启消失的，还有日志。
+
+启动 zygisk 又关闭后，确实出现了「检测到 zygisk」。然后我们 `logcat -c` ，这个情况就消失了。
+
+app 权限只能读取到自己的日志，不过可以读取同一 uid 存在于日志缓存中的任何时刻的日志，这也是「时效性」的体现。
+
+我们知道，Zygisk 在降权后仍有可能输出日志，此时就是 android logging ，并且是以 app 的 uid 发出的。
+
+> P.S. 在 shamiko + zygisk 的组合中，读取 momo 的日志找到了这两条：  
+> ```log
+> 10-01 10:08:43.170 10335 10335 E Magisk  : xhook: set addr prot failed. ret: 13
+> 10-01 10:08:43.170 10335 10335 E Magisk  : xhook: replace function failed: 
+> pthread_create at .rela.plt
+> ```
+> 看上去 shamiko 处理失败了，导致 `pthread_create` 没有被 hook （或 unhook？）
+
+于是修改了一下，让 zygisk 在 denylist 中不输出日志，果然通过了！
+
+![](res/images/20221001_01.png)
+
+模块也可以正常加载：
+
+![](res/images/20221001_02.png)
+
+
+> 听说这个版本的 momo 还引入了短方法 inline 检测（针对 lsposed），不过此处在开启了 lsposed 的情况下重装 momo 也没发现问题。难道没有触发 dex2oat ？
+
