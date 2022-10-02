@@ -1257,3 +1257,78 @@ app 权限只能读取到自己的日志，不过可以读取同一 uid 存在�
 
 > 听说这个版本的 momo 还引入了短方法 inline 检测（针对 lsposed），不过此处在开启了 lsposed 的情况下重装 momo 也没发现问题。难道没有触发 dex2oat ？
 
+## 细节
+
+前面的工作成功地实现了使用 nb 注入 zygisk ，并且得到了和原版 zygisk 效果一致的版本，还具有更高的隐蔽性（能通过 momo）。
+
+现在该考虑一些细节问题。
+
+### 重置 nb props  
+
+为了隐藏修改，需要我们在 zygote 启动成功后把 nb props 还原回去，而如果 zygote 意外死亡（实际上相当常见），还要在 zygote 再次启动之前把 props 又设置成我们的 loader 。此外，如果 zygote 启动过程中反复死亡，为了确保用户正常进入系统，也要在恰当的时候还原 props 。
+
+Riru 创建了一个 rirud 的 java root daemon 进程来实现重置 props ：开始时等待系统服务启动（轮询 getService AMS），发现启动后就调用 resetprop 命令行工具，设置回原来的 bridge 。如果检测到 zygote 死亡（实际上是系统服务死亡， linkToDeath AMS）就又把 props 设置回去。
+
+为什么以 system server 的 AMS 为参考？因为 system server 与 zygote 的生命是相互绑定的，一个死亡其他的都会死亡（导致 zygote 重启）。并且系统服务是首个被 fork 的进程，若存在多个 zygote ，在进入 system server 之前还会等待所有 zygote 启动。因此 system server 启动就代表了所有 zygote 都启动成功。而 AMS 是 android 的关键服务，每个 app 进程都需要与 AMS 通信，不可缺少。因此 AMS 的存在即代表 system server 的存活。
+
+现在来到 magisk ，我们没有 java daemon ；由于缺乏 API ，在 native 访问 binder 又相当麻烦，所以应该怎么实现呢？
+
+虽然也不是不能造一个 java daemon ，但是这样又要引入额外的代码，比较麻烦。
+
+magisk 在 init 中注入了一个 trigger ，当 zygote 重启的时候会触发执行 magisk ，连接到 daemon 执行一些处理。
+
+```cpp
+// native/src/init/magiskrc.inc
+"on property:init.svc.zygote=restarting\n"
+"    exec %1$s/magisk --zygote-restart\n"
+"\n"
+
+"on property:init.svc.zygote=stopped\n"
+"    exec %1$s/magisk --zygote-restart\n"
+"\n"
+```
+
+这个 trigger 主要是用来清理未使用的 uid 的。
+
+```cpp
+// native/src/core/bootstages.cpp
+void zygote_restart(int client) {
+    close(client);
+
+    LOGI("** zygote restarted\n");
+    pkg_xml_ino = 0;
+    prune_su_access();
+}
+```
+
+不过 magisk avd 的模拟模式并不会注入 init.rc ，因此这个如果利用这个 trigger 的话调试起来比较麻烦。并且这样会导致 zygisk 依赖 init 。
+
+此外，我们不能总是假定 system server 可以注入，因为 denylist 是允许我们排除 system server 的。
+
+考虑下面的方案：
+
+检测所有 zygote 启动：
+
+1. zygote 启动后，轮询 `service check activity` 检测 AMS 启动。  
+
+看上去很美好，但是 `service check` 并不会通过返回值告诉你服务是否存在，所以要处理 stdout ，非常麻烦。而且依赖系统的可执行程序其实也不怎么稳定。
+
+2. forkSystemServer 之后提供 pid ，轮询 /proc/pid/cmdline 是否变为 system_server 。
+
+setArgv0 应该发生在 wait zygote 之后，不过实现起来比较麻烦，也不稳定（万一某些系统改了名字）。
+
+3. 等待所有 zygote 启动（自行判断是否是「所有的」）
+
+检测 zygote 死亡：
+
+1. 在 zygisk 中，使用文件锁检测 zygote 死亡。  
+
+最终方案：
+
+在 forkSystemServer post 的时候连接到 magiskd ，发送 system server 的 pid ，在 magiskd 开启线程轮询 system_server 的 cmdline ，如果变成 `system_server` ，重置 prop ；同时从 magiskd 接收一个 RDONLY 打开的文件（context 为 system_file），fcntl SETLK 设置读锁，设置成功则通知 magiskd 打开同一个文件，开启新线程，fcntl F_SETLKW 阻塞设置写锁，这个线程一直等待，如果取得锁，说明 zygote 已经死亡，然后执行恢复 prop 。
+
+还需要说明几点：
+
+1. zygote 对 system_file 有 read 和 lock 权限，但是没有 write ，因此发送一个 WRONLY 的过去并设置写锁是不允许的，只好设置读锁，而 magiskd 一侧要设置写锁才能进入冲突等待的状态。 
+2. 获取锁的线程设置了较高的优先级。  
+3. zygote 需要持有这个锁文件，但是由于 zygote fd 泄露检测机制的存在（发生在 fork 前），无法正常产生 app 进程；因此我们让 zygote 再 fork 一个 holder 进程，由这个进程设置并持有文件锁，这样原 zygote 就不需要持有文件了，并且设置 prctl PR_SET_PDEATHSIG ，确保 zygote 死亡的时候我们的 holder 也能死亡并通知 magiskd 。  
