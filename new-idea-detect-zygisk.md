@@ -217,3 +217,192 @@ int main(int argc, char **argv) {
 实际上正常 android 的 zygote 在 selinux 规则中是不带 umount 权限的，因此需要修改 selinux 规则，此处直接借用了 magisk 规则， `magiskpolicy --magisk` 。
 
 另外，如果直接 bind mount /data 下的 wrapper 到 app_process ，init 是无法执行的，看日志似乎报了个 `nosuid_transition` 和一个 `execute_no_trans` 。解决方法是 mount 一个 tmpfs ，在这里面有 suid ，把 wrapper 放在这里再 bind mount ，执行成功。一开始不能理解，因为看 magisk 的内置规则也没有给 execute_no_trans 权限，不过考虑前一个 denied 原因，可以猜测其中的原因：是 data 的挂载参数中的 nosuid 惹的祸，无法 suid 就无法改变 selinux label ，只好 fallback (?)到 execute_no_trans ，而这也是 selinux 规则不允许的。这下总算理解为什么 magisk 要把包装放在 tmpfs 里面了。
+
+## 基于 smaps 检测代码注入
+
+之前研究 livin 的时候，strace 发现了它读取 /proc/self/smaps 。
+
+虽然没有仔细逆向过具体的逻辑，不过总感觉 smaps 里面大有文章，于是自己推测了一下 smaps 在检测方面的利用。
+
+### maps
+
+我们知道，读取 maps 可以得到进程自身的内存映射情况，进而实施检测，如检查路径、设备号特征等，更进一步地，还可以扫描特定页面的内存，寻找特征。对于检查路径这种简单的手段，我们可以使用匿名 mmap 替代原有的文件 map 来简单 bypass ，riru 的 riruhide 就是这个做法。而如果是已经被 linker 完全卸载的 so ，简单检查 maps 也不可能找到。
+
+### smaps
+
+smaps 是 maps 的扩充，它除了提供 maps 提供的内容，即内存映射的地址、文件路径、权限之外，还提供了一些统计信息。
+
+[proc(5) - Linux manual page](https://man7.org/linux/man-pages/man5/proc.5.html)
+
+下面就是一个典型的 smaps ：
+
+```
+00400000-0048a000 r-xp 00000000 fd:03 960637       /bin/bash
+Size:                552 kB
+Rss:                 460 kB
+Pss:                 100 kB
+Shared_Clean:        452 kB
+Shared_Dirty:          0 kB
+Private_Clean:         8 kB
+Private_Dirty:         0 kB
+Referenced:          460 kB
+Anonymous:             0 kB
+AnonHugePages:         0 kB
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+Swap:                  0 kB
+KernelPageSize:        4 kB
+MMUPageSize:           4 kB
+KernelPageSize:        4 kB
+MMUPageSize:           4 kB
+Locked:                0 kB
+ProtectionKey:         0
+VmFlags: rd ex mr mw me dw
+```
+
+那么，这些统计数字又能告诉我们什么呢？
+
+### 数字中暗藏玄机
+
+我们关注 `{Shared,Private}_{Clean,Dirty}` 字段。Clean 即未修改的页面，Dirty 即修改过的页面；Shared 表示有多个进程引用，Private 表示只有一个进程（自然是当前进程）引用。
+
+我们知道，xhook 的 hook 原理是修改重定位地址，而 unhook 就是把重定位的地址改回去。
+
+重定位地址一般位于 `.data.rel.ro` 节，也就是位于 elf 文件内，或者说对应的 map 必然是文件 map 。因此我们修改这个段，就会产生 dirty page 。
+
+我们知道 zygisk hook 了 libandroid_runtime.so 的很多函数，因此必然产生了 dirty page ，这样特征就体现在 smaps 中了。
+
+也许你会想，linker 自己重定位的时候不也要写吗，这样怎么区分 xhook 修改的和 linker 修改的呢？
+
+我们知道，zygisk 的 unhook 发生在 fork 后的新进程，而 unhook 也是要修改 page 的，并且修改后的 page 一般不会被其他进程共享（除非 fork 了）。
+
+因此，只要发现 libandroid_runtime.so 的重定位地址对应的页有 Private_Dirty ，就说明遭到修改。
+
+这样就导致我们总可以检测到 zygisk 的 hook 。假如我们不 unhook ，则我们的 so 也没法 unload ，修改的地址也无法还原，同样可以被检测。
+
+那么关键是如何找到重定位地址的页。实际上我们可以模仿 linker 的行为，从 dynamic 段 -> DT_ANDROID_RELA 遍历地址，找到对应的 page ；或者解析 elf sections ，找到 `.data.rel.ro` 。
+
+我们也可以直接找 `r--p` 的页，因为重定位节在系统重定位结束后就会重新映射为只读了。
+
+经过测试，一般情况下系统的 so 都不存在 权限为 `r--p` 且有 private dirty page 的页，不过也有例外：EMUI 上有一些奇怪的 so ，从 r-xp 页看上去像是 zygote 加载的，然而 r--p 页有 private dirty。
+
+因此看上去只能拉白名单了，主动检测 /system /apex 下的 libandroid_runtime.so, libart.so, app_process 之类的路径的 map 。
+
+```
+10-16 13:08:55.247 17647 17677 D d2.c    : found dirty ro page 7b173f2000-7b173f3000 r--p 0000f000 fd:00 1524802                        /system/lib64/libhwetrace_jni.so (Private_Dirty:         4 kB)
+10-16 13:08:55.404 17647 17677 D d2.c    : found dirty ro page 7ba82bd000-7ba82be000 r--p 0002f000 fd:00 1524842                        /system/lib64/libhwgl.so (Private_Dirty:         4 kB)
+10-16 13:08:55.445 17647 17677 D d2.c    : found dirty ro page 7ba8c9e000-7ba8ca0000 r--p 0000e000 fd:00 1524295                        /system/lib64/libgpuassistant_client.so (Private_Dirty:         4 kB)
+10-16 13:08:55.553 17647 17677 D d2.c    : found dirty ro page 7baa2ee000-7baa2ef000 r--p 0000f000 fd:00 1525078                        /system/lib64/libiAwareSdkAdapter.so (Private_Dirty:         4 kB)
+10-16 13:08:55.599 17647 17677 D d2.c    : found dirty ro page 7bab3ed000-7bab3f0000 r--p 0001d000 fd:00 1513074                        /system/lib64/android.hardware.configstore@1.0.so (Private_Dirty:         4 kB)
+
+7b173d0000-7b173d2000 r-xp 00000000 fd:00 1524802                        /system/lib64/libhwetrace_jni.so
+Size:                  8 kB
+Rss:                   8 kB
+Pss:                   0 kB
+Shared_Clean:          8 kB
+Shared_Dirty:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:         0 kB
+Referenced:            8 kB
+Anonymous:             0 kB
+AnonHugePages:         0 kB
+--
+7b173ef000-7b173f0000 r--p 0000f000 fd:00 1524802                        /system/lib64/libhwetrace_jni.so
+Size:                  4 kB
+Rss:                   4 kB
+Pss:                   4 kB
+Shared_Clean:          0 kB
+Shared_Dirty:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:         4 kB
+Referenced:            4 kB
+Anonymous:             4 kB
+AnonHugePages:         0 kB
+--
+7b173f0000-7b173f1000 rw-p 00010000 fd:00 1524802                        /system/lib64/libhwetrace_jni.so
+Size:                  4 kB
+Rss:                   4 kB
+Pss:                   4 kB
+Shared_Clean:          0 kB
+Shared_Dirty:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:         4 kB
+Referenced:            4 kB
+Anonymous:             4 kB
+AnonHugePages:         0 kB
+```
+
+### 重定位节的权限
+
+```
+five_ec1cff@LAPTOP-H42AMUM5:/mnt/d/Documents/tmp$ readelf -l libandroid_runtime.so
+
+Elf file type is DYN (Shared object file)
+Entry point 0x9c000
+There are 10 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  PHDR           0x0000000000000040 0x0000000000000040 0x0000000000000040
+                 0x0000000000000230 0x0000000000000230  R      0x8
+  LOAD           0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x000000000009ba24 0x000000000009ba24  R      0x1000
+  LOAD           0x000000000009c000 0x000000000009c000 0x000000000009c000
+                 0x00000000000f1b20 0x00000000000f1b20  R E    0x1000
+  LOAD           0x000000000018e000 0x000000000018e000 0x000000000018e000
+                 0x0000000000018720 0x0000000000018720  RW     0x1000
+  LOAD           0x00000000001a6720 0x00000000001a7720 0x00000000001a7720
+                 0x0000000000000f48 0x0000000000003340  RW     0x1000
+  DYNAMIC        0x00000000001a1208 0x00000000001a1208 0x00000000001a1208
+                 0x00000000000005f0 0x00000000000005f0  RW     0x8
+  GNU_RELRO      0x000000000018e000 0x000000000018e000 0x000000000018e000
+                 0x0000000000018720 0x0000000000019000  R      0x1
+  GNU_EH_FRAME   0x000000000007339c 0x000000000007339c 0x000000000007339c
+                 0x00000000000079f4 0x00000000000079f4  R      0x4
+  GNU_STACK      0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000000 0x0000000000000000  RW     0x0
+  NOTE           0x0000000000000270 0x0000000000000270 0x0000000000000270
+                 0x0000000000000038 0x0000000000000038  R      0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00
+   01     .note.android.ident .note.gnu.build-id .dynsym .gnu.version .gnu.version_r .gnu.hash .dynstr .rela.dyn .relr.dyn .rela.plt .rodata .eh_frame_hdr .eh_frame
+   02     .text .plt
+   03     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt
+   04     .data .bss
+   05     .dynamic
+   06     .data.rel.ro .fini_array .init_array .dynamic .got .got.plt
+   07     .eh_frame_hdr
+   08
+   09     .note.android.ident .note.gnu.build-id
+```
+
+可以看到， `.data.rel.ro` 位于一个 RW 的 LOAD 段，但是又在 GNU_RELRO 段，因此是只读的。
+
+### 参考
+
+soinfo::link_image bionic/linker/linker.cpp
+
+https://android.googlesource.com/platform/bionic/+/4c524711a19a5f02000122b2118017e128c537eb/linker/linker.cpp#3231
+
+soinfo::relocate bionic/linker/linker_relocate.cpp
+
+https://android.googlesource.com/platform/bionic/+/81f0bdb6f303d5281b7082dc7badb248667a5f0c/linker/linker_relocate.cpp#588
+
+phdr_table_protect_gnu_relro bionic/linker/linker_phdr.cpp
+
+https://android.googlesource.com/platform/bionic/+/4c524711a19a5f02000122b2118017e128c537eb/linker/linker_phdr.cpp#933
+
+[&#x5b;原创&#x5d;Android Linker详解(二)-bbs.pediy.com](https://bbs.pediy.com/thread-269891.htm#so%E9%87%8D%E5%AE%9A%E4%BD%8D)
+
+GNU_RELRO:
+
+[linux - Why ELF program headers have two LOAD entries, while the program layout three sections - Stack Overflow](https://stackoverflow.com/questions/28114323/why-elf-program-headers-have-two-load-entries-while-the-program-layout-three-se)
+
+[Shared Libraries on Android](https://chromium.googlesource.com/chromium/src/+/d8bc2922c32620414673d34b6334b2fd8a688c7b/docs/android_native_libraries.md#RELRO-Sharing)
+
+### 如何规避
+
+可以尝试在 hook 前把要修改的 page mremap 到一个地方备份，我们自己 map 并复制原来的 page 作为 hook 后的重定位表；所有函数都 unhook 的时候再把备份的 map 给 remap 回来。（就是不知道此时 smaps 会如何显示这部分 maps 了）

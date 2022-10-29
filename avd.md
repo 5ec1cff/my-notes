@@ -107,3 +107,15 @@ adb shell sh /data/local/tmp/avd_magisk.sh
 ```
     -no-snapshot                                                        perform a full boot and do not auto-save, but qemu vmload and vmsave operate on snapstorage
 ```
+
+## 删除快照
+
+上面的方法是临时不从快照启动，而下次启动实际上还是从快照启动的。
+
+虽然似乎可以禁用快照，不过这样就慢了，我们只是想在快照坏掉的时候把它删掉。
+
+每个 avd 的快照位于：
+
+`~\.android\avd\$AVD_NAME\snapshots\$SNAPSHOT_NAME`
+
+快照都有名字，默认为 `default_boot` ，直接将整个快照删掉，下次就会重新启动了。

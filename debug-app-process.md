@@ -1,8 +1,10 @@
-# 调试 app_process 程序
+# Android app 调试
+
+## 调试 app_process 程序
 
 调试 app_process 程序一直是个麻烦的问题，因为官方并没有文档说明。一些知名项目也需要启动 app_process 进程，为了解决调试需求，必然有应对的方法，我们来学习一下：
 
-## LSPosed
+### LSPosed
 
 LSPosed 会运行一个 app_process 启动的 root daemon `lspd` ，其中还加载了原生代码。
 
@@ -27,7 +29,7 @@ fi
 
 [&#x5b;core&#x5d; Support debugger · LSPosed/LSPosed@409a197](https://github.com/LSPosed/LSPosed/commit/409a1974318a009994593dd8c4dae5eef89278c7)
 
-## Scrcpy
+### Scrcpy
 
 scrcpy 的 app_process 启动逻辑写在 client app 的 [server.c](https://github.com/Genymobile/scrcpy/blob/ed84e18b1ae3e51d368f8c7bc88ba4db088e6855/app/src/server.c#L172) 里面：
 
@@ -55,7 +57,7 @@ scrcpy 的 app_process 启动逻辑写在 client app 的 [server.c](https://gith
 [Fix server debugger for Android >= 9 · Genymobile/scrcpy@902b991](https://github.com/Genymobile/scrcpy/commit/902b99174df8ffc1fe7548399c19e446aa5488b6)  
 [Document how to attach a debugger to the server · Genymobile/scrcpy@683f7ca](https://github.com/Genymobile/scrcpy/commit/683f7ca848ad4785557d116dcea466f1b5654ef9)  
 
-## Shizuku
+### Shizuku
 
 Shizuku 的用户服务也是 app_process ，和 Shizuku 服务本体一样通过 [ServiceStarter](https://github.com/RikkaApps/Shizuku/blob/234b1c8335e821e63fd5a4d923627b358ccfe11e/starter/src/main/java/moe/shizuku/starter/ServiceStarter.java#L34) 启动，其中也有调试参数：
 
@@ -94,13 +96,13 @@ Shizuku 的用户服务也是 app_process ，和 Shizuku 服务本体一样通�
 
 > Sui 的[启动](https://github.com/RikkaApps/Sui/blob/352e70efc0c6d341aeec7b3e76b36a55f4cbacf2/module/src/main/cpp/util/app_process.cpp#L57)中也有类似的逻辑，参数是一模一样的，只不过是 C++ 写的，这里就不展示了。
 
-## libsu
+### libsu
 
 Magisk 作者的 root 支持库 libsu 中也有 Root Service 功能，其中也包含了对 root 进程调试的支持。
 
 [RootServiceManager.java](https://github.com/topjohnwu/libsu/blob/02abb7b20434a423e63aea5eebdbc6a15033ee0d/service/src/main/java/com/topjohnwu/superuser/internal/RootServiceManager.java#L81)
 
-## 分析
+### 分析
 
 我们首先观察到，对于较低版本的 android 多采用这两种参数启动调试：
 
@@ -139,7 +141,7 @@ Android 11 后移除了 internal ，搜索还发现这个 issue ：
 
 [JDWP provider `internal` no longer exists on Android 11 · Issue #23 · Chainfire/librootjava](https://github.com/Chainfire/librootjava/issues/23)
 
-## 使用
+### 使用
 
 于是我就稍微修改了一下 ash 脚本：
 
@@ -336,7 +338,7 @@ failed to get reply to handshake packet
 
 不过 native 调试似乎不认识 `Debug.waitForDebugger` ，也许 dual 模式就认识了？
 
-## 让 AS 识别需要调试的进程  
+### 让 AS 识别需要调试的进程  
 
 从上面的实验来看，不仅要配置 app_process 的 jdwp 参数，而且还要调用 `DdmHandleAppName.setName` ，才能让 AS 认出我们的待调试进程（并且似乎只有 root 进程才生效？）。简单搜了一下代码发现，这玩意最终会和 `@jdwp-control` socket 通信，获得一个 agent socket 。~~普通 app 没有权限连接，需要调试的 app 可能是在 zygote 降权之前建立连接的~~。
 
@@ -345,7 +347,7 @@ failed to get reply to handshake packet
 > 连接 jdwp 的工作在 `ZygoteHooks.callPostForkChildHooks` 执行，对于 debuggable 的进程，会创建一个进程维护 jdwp 的连接（确保 adbd 重启后 app 进程不需要重启仍然可以调试，参考代码：`packages/modules/adb/libs/adbconnection/adbconnection_client.cpp` ）
 > 至于为何 app 权限的 app_process 无法启动调试还有待研究。  
 
-## 修改 AS ？  
+### 修改 AS ？  
 
 首先根据上面 stacktrace 的类名 `com.android.tools.ndk.run.lldb.ConnectLLDBTask` 试图用 cs 在 android studio 仓库里面搜索源码，但是一无所获。
 
@@ -434,3 +436,388 @@ root 后：
 给原项目提了个 issue （因为不敢 PR）：
 
 [adbd root 无法调试 App · Issue #42 · RikkaApps/Sui](https://github.com/RikkaApps/Sui/issues/42)
+
+**2022.10.2**
+
+然而这样会导致 adbd 创建的所有 socket 都成为 adbd 的 domain ，导致 adb forward 无法任意转发 socket （会影响调试功能），故上面的方法太简单粗暴，我们要想一个更好的方法。
+
+起初想 hook bind ，如果是 jdwp-control 就临时修改 sockcreate ，并且 dup2 替换原来的 fd 。
+
+> jdwp-control 创建：packages/modules/adb/libs/adbconnection/adbconnection_server.cpp
+
+需要注意这样不能 close 原 fd ，只能让 dup2 覆盖（因为这里使用了 unique_fd ，c 库会负责检查 close ）
+
+此外这个操作是不在主线程的，因此需要修改 `/proc/thread-self/attr/sockcreate` （任何线程只能改自己的 sockcreate ，没有特权去修改其他线程的，即使是同一个进程）
+
+然而这样虽然 jdwp-control 是 adbd 了，但是提供给 app client 的 socketpair 还是 magisk 的，导致 app 侧仍然连不上。因此继续这个想法就更复杂了。
+
+问题的本质是现在我们修改使得 magisk domain 的 adbd 创建的所有 socket 都是 adbd domain 的，而这样的 socket 用来 connect magisk domain 的也会被拒绝（看来 socket 鉴权用的是 socket 的 label 而非 process 的）。所以干脆让 adbd 可以访问 magisk 的 socket 就行了，sepolicy.rule 加一句：
+
+```
+allow adbd magisk unix_stream_socket { ioctl read write create getattr setattr lock append map bind connect listen accept getopt setopt shutdown connectto }
+```
+
+这样 native 调试也没问题了。
+
+> 如果先前用了 adbd root 进行 native 调试，那么以后不在 root 的时候如果要调试，需要先删掉 `/data/data/$pkg/lldb` 目录，否则也会出问题，因为这个目录被创建成 root 才能用了，而非 root 调试用的是 run-as 切成 debuggable app 的 uid 。
+
+## Zygisk 破坏了 native debug 功能  
+
+Magisk 有一个 issue ，声称 zygisk 破坏了 native debug 功能：
+
+[Magisk Zygisk breaks NDK C++ native breakpoints · Issue #6229 · topjohnwu/Magisk](https://github.com/topjohnwu/Magisk/issues/6229)
+
+具体表现为，开启 zygisk 的情况下，Android Studio 的 lldb 可以正常找到系统库的镜像，却无法找到 app 的，在这种情况下，app 代码的断点无法使用，console `image list` 中也不含 app 的 so 。如果关闭 zygisk 则无此问题。
+
+![](res/images/20221003_01.png)
+
+还记得前段时间想要调试 native ，结果也是无法调试，当时还在纳闷什么原因，看上去真的是 zygisk 的锅。
+
+这个 issue 至今没有回复。因为我现在用的手机换用了自己编译的 maru zygisk ，所以测试了一下，发现 native 调试功能正常。而后在模拟器测试也正常。
+
+issue 提出者好像仅测试了 arm64 的设备，于是我在 x86-64 的模拟器上安装原版 magisk 测试，发现确实无法调试。
+
+看起来原版 magisk 可能有问题，而 maru 不知道为什么没有这个问题。
+
+进一步测试发现，无论是否开启排除列表，都无法调试。
+
+issue 提出者还向 google 提了 issue ，对方竟然还回应了。google 方面的人测试了确实存在这个问题，并且是 zygisk 导致的，与 Android Studio 无关。
+
+他们推测的原因是：
+
+```
+LLDB has a mechanism for detecting when an .so is loaded.
+This is implemented by inserting a breakpoint, called a rendezvous breakpoint, into a specific location in the dynamic linker.
+Enabling Zygisk seems to break this mechanism.
+```
+
+LLDB 在 linker 的某处插断点，检测 so 的加载，而 zygisk 破坏了该机制。
+
+> 这可能还说明 app 的 so 实际上在 lldb attach 后才加载。
+
+他们还给了一个 workaround ：
+
+```
+Possible Workaround (other than disabling Zygisk):
+
+Start your app.
+Wait until it loads your .so file(s).
+Use Android Studio's Attach Debugger to Android Process.
+Your breakpoints should now work.
+Note that you cannot debug the startup part of your app using this technique as the app won't wait until the debugger is attached and continue running.
+```
+
+不 attach lldb 启动 App ，等到目标 so 被加载的时候再 attach 上去，这样是可以正确找到 app 的 so 的。唯一不足的一点是不能调试 so 的初始化代码。
+
+于是我也按照上面的方法测试了一下，这样确实就能正确找到 so 了，但是为什么？
+
+「分析日志是分析问题的最好手段」。我决定从 gdb server 的日志入手，这个日志位于 `/data/data/$pkgName/lldb/log/gdb-server.log` 。
+
+首先 lldb attach 启动 app ，复现问题，然后 detach ，把这份日志 pull 出来（称为 gdb-server.log 或日志 1）。接着不关闭 app ，重新 attach ，此时也同样复现了上面的 workaround ，然后再 pull 日志（称为 gdb-server2.log 或日志 2）。我们来比较一下两份日志的区别。
+
+> 同一个进程可以确保内存中 so 的地址都是一致的，更加便于分析。
+
+首先搜索我们目标的 so ，这里 so 的名字是 `libvvb2060.so` ，搜索一下：
+
+![](res/images/20221003_02.png)
+
+出乎意料的是，两个 log 都出现且仅出现了一次这个名字。
+
+![](res/images/20221003_03.png)
+
+观察日志可以发现，这个 so 名字所在的行是一个 xml ，根标签是 `library-list-svr4` 。并且都以 `send packet` 开头，看上去是向远程发送包含了 so 的名字和地址的信息。
+
+注意到日志 1 中，`library-list-svr4` 出现了 34 次，说明发送了 17 次，并且看上去每一次都是收集所有已知的 so ，全部发送。日志 2 中仅出现了 2 次，即只发送了 1 次。考虑到第一次是在进程启动的时候就 attach 的，因此这些发送应当是发生在 so 加载的时候。顺带一提，包含 `libvvb2060.so` 的 packet 是最后一个被发送的 packet 。
+
+看起来 gdb server 是能够触发 so 加载的断点的，google 方面的猜测不成立。
+
+既然能触发，并且 so 的信息也被发送给了远程，为什么第一次 attach 就是无法正确找到 so 呢？
+
+继续观察日志 1 ，我们发现，除了第一次发送 packet 之外，之后发送 packet 后都有下面的错误信息：
+
+![](res/images/20221003_04.png)
+
+看起来远程试图读取同一个地址，而读取都失败了。难道是这个错误导致了 so 列表未得到及时更新？
+
+`63d6111ef000: failed to read\. Error: I/O error`
+
+看看这个地址属于谁（来自日志 1）：
+
+```xml
+<library name="/system/bin/app_process64" lm="0x70673e3160e0" l_addr="0x63d6111b1000" l_ld="0x63d6111b5a40" />
+```
+
+l_addr 应当是 so 的基地址（与 maps 中首次出现 so 的项目的地址对应），其他的 so 地址都是 `0x7` 开头，因此只可能是这个 so 的地址有问题。
+
+```sh
+grep app_process64 /proc/4483/maps
+63d6111b1000-63d6111b3000 r--p 00000000 fe:04 233                        /system/bin/app_process64
+63d6111b3000-63d6111b5000 r-xp 00001000 fe:04 233                        /system/bin/app_process64
+63d6111b5000-63d6111b6000 r--p 00002000 fe:04 233                        /system/bin/app_process64
+grep 63d6111 /proc/4483/maps
+63d6111b1000-63d6111b3000 r--p 00000000 fe:04 233                        /system/bin/app_process64
+63d6111b3000-63d6111b5000 r-xp 00001000 fe:04 233                        /system/bin/app_process64
+63d6111b5000-63d6111b6000 r--p 00002000 fe:04 233                        /system/bin/app_process64
+```
+
+很显然，这个地址似乎也不属于 app_proces64
+
+起初以为是 zygisk 自卸载的问题， 于是尝试加载个模块让它不要卸载。于是用 lsposed 随便选了个模块注入，然而问题更大了，加载的时候直接在某个奇怪的线程断了下来。
+
+……
+
+也许应该从本地的 lldb 日志找找原因（然而并没有日志）
+
+我们知道 zygisk 二阶段的 so 就是 app_process 本身（实际上是 bind mount 的 magisk），而二阶段的卸载发生在 specialize post ，并且是创建一个线程 dlclose 。
+
+有没有可能是自卸载的问题呢？但是我们观察日志 1 的所有 app_process64 镜像的基址，位置都是一致的，且与 maps 相同，而 maps 指向的 inode 也是正确的；此外，maru 也有自卸载，但是 maru 就可以正常调试。
+
+> [&#x5b;原创&#x5d;lldb/gdb通信协议研究-iOS安全-看雪论坛-安全社区|安全招聘|bbs.pediy.com](https://bbs.pediy.com/thread-215106.htm)
+
+我们注意到，native debug 会拉取远程进程内存中的所有镜像到本地存放。
+
+```
+(lldb) image list
+[  0] D0DE7A48-0335-1049-77C5-D17EF5F7C98D-8ECA3651 0x00005f7497157000 C:\Users\mspri\.lldb\module_cache\remote-android\.cache\D0DE7A48-0335-1049-77C5-D17EF5F7C98D-8ECA3651\app_process64 
+```
+
+检查 maps ，发现地址似乎是正确的：
+
+```
+emulator64_x86_64:/ # grep app_process /proc/12113/maps
+5f7497157000-5f7497159000 r--p 00000000 fe:04 233                        /system/bin/app_process64
+5f7497159000-5f749715b000 r-xp 00001000 fe:04 233                        /system/bin/app_process64
+5f749715b000-5f749715c000 r--p 00002000 fe:04 233                        /system/bin/app_process64
+```
+
+然而实际拉取的镜像却是 magisk ，从很多方面可以证实：字符串、符号表、文件大小……说明调试器实际上是从路径拉取文件的，而这个文件刚好就是 magisk mount 上去的假的 app_process 。
+
+![](res/images/20221004_01.png)
+
+另外，这个 UUID 似乎是根据路径名生成的，每次拉取的 app_process 对应的 UUID 是一样的。
+
+尝试 denylist ，但是并无作用，得到的 app_process 仍然是 magisk 。
+
+突然意识到拉取 so 有可能是通过 adb pull ，是全局挂载命名空间，所以 denylist 的 umount 其实没什么卵用。
+
+干脆手动在全局 ns umount 一下： `umount -l /system/bin/app_process64` ，结果这一下果然能正常调试了！
+
+看来问题的根源真就是这个 app_process64 ……
+
+## wait for debugger 原理
+
+`am start -D` 设置系统中的 debug app （和开发者选项选择要调试的 app 效果一样）。
+
+AMS.attachApplication 会调用 AT.bindApplication ，其中有一个 debugMode flags ，如果需要等待，会添加 `DEBUG_WAIT`
+
+```java
+// frameworks/base/core/java/android/app/ActivityThread.java
+    private void handleBindApplication(AppBindData data) {
+        if (data.debugMode != ApplicationThreadConstants.DEBUG_OFF) {
+            // XXX should have option to change the port.
+            Debug.changeDebugPort(8100);
+            if (data.debugMode == ApplicationThreadConstants.DEBUG_WAIT) {
+                Slog.w(TAG, "Application " + data.info.getPackageName()
+                      + " is waiting for the debugger on port 8100...");
+
+                IActivityManager mgr = ActivityManager.getService();
+                try {
+                    mgr.showWaitingForDebugger(mAppThread, true);
+                } catch (RemoteException ex) {
+                    throw ex.rethrowFromSystemServer();
+                }
+
+                Debug.waitForDebugger();
+
+                try {
+                    mgr.showWaitingForDebugger(mAppThread, false);
+                } catch (RemoteException ex) {
+                    throw ex.rethrowFromSystemServer();
+                }
+
+            } else {
+                Slog.w(TAG, "Application " + data.info.getPackageName()
+                      + " can be debugged on port 8100...");
+            }
+```
+
+通知 AMS 显示 waiting for debugger 对话框，并调用 `Debug.waitForDebugger()`
+
+```java
+// frameworks/base/core/java/android/os/Debug.java
+    /**
+     * Wait until a debugger attaches.  As soon as the debugger attaches,
+     * this returns, so you will need to place a breakpoint after the
+     * waitForDebugger() call if you want to start tracing immediately.
+     */
+    public static void waitForDebugger() {
+        if (!VMDebug.isDebuggingEnabled()) {
+            //System.out.println("debugging not enabled, not waiting");
+            return;
+        }
+        if (isDebuggerConnected())
+            return;
+
+        // if DDMS is listening, inform them of our plight
+        System.out.println("Sending WAIT chunk");
+        byte[] data = new byte[] { 0 };     // 0 == "waiting for debugger"
+        Chunk waitChunk = new Chunk(ChunkHandler.type("WAIT"), data, 0, 1);
+        DdmServer.sendChunk(waitChunk);
+
+        mWaiting = true;
+        while (!isDebuggerConnected()) {
+            try { Thread.sleep(SPIN_DELAY); }
+            catch (InterruptedException ie) {}
+        }
+        mWaiting = false;
+
+        System.out.println("Debugger has connected");
+
+        /*
+         * There is no "ready to go" signal from the debugger, and we're
+         * not allowed to suspend ourselves -- the debugger expects us to
+         * be running happily, and gets confused if we aren't.  We need to
+         * allow the debugger a chance to set breakpoints before we start
+         * running again.
+         *
+         * Sit and spin until the debugger has been idle for a short while.
+         */
+        while (true) {
+            long delta = VMDebug.lastDebuggerActivity();
+            if (delta < 0) {
+                System.out.println("debugger detached?");
+                break;
+            }
+
+            if (delta < MIN_DEBUGGER_IDLE) {
+                System.out.println("waiting for debugger to settle...");
+                try { Thread.sleep(SPIN_DELAY); }
+                catch (InterruptedException ie) {}
+            } else {
+                System.out.println("debugger has settled (" + delta + ")");
+                break;
+            }
+        }
+    }
+```
+
+isDebuggerConnected 最终调用到 dalvik.system.Debug 的 native 方法。
+
+```java
+// frameworks/base/core/java/android/os/Debug.java
+    public static boolean isDebuggerConnected() {
+        return VMDebug.isDebuggerConnected();
+    }
+
+// libcore/dalvik/src/main/java/dalvik/system/VMDebug.java
+    /**
+     * Determines if a debugger is currently attached.
+     *
+     * @return true if (and only if) a debugger is connected
+     *
+     * @hide
+     */
+    @UnsupportedAppUsage
+    @SystemApi(client = MODULE_LIBRARIES)
+    @FastNative
+    public static native boolean isDebuggerConnected();
+```
+
+```cpp
+// art/runtime/native/dalvik_system_VMDebug.cc
+static jboolean VMDebug_isDebuggerConnected(JNIEnv*, jclass) {
+  // This function will be replaced by the debugger when it's connected. See
+  // external/oj-libjdwp/src/share/vmDebug.c for implementation when debugger is connected.
+  return false;
+}
+```
+
+这个方法看起来需要被调试器替换以返回 true 。上面给了一个 debugger 的实现示例。
+
+不过实际的源码位置在 `external/oj-libjdwp/src/share/back/vmDebug.c` ：
+
+```c
+// external/oj-libjdwp/src/share/back/vmDebug.c
+// For backwards compatibility we are only considered 'connected' as far as VMDebug is concerned if
+// we have gotten at least one non-ddms JDWP packet.
+static jboolean
+isDebuggerConnected()
+{
+    return transport_is_open() && atomic_load(&hasSeenDebuggerActivity);
+}
+
+void
+vmDebug_initalize(JNIEnv* env)
+{
+    WITH_LOCAL_REFS(env, 1) {
+        jclass vmdebug_class = JNI_FUNC_PTR(env,FindClass)(env, "dalvik/system/VMDebug");
+        if (vmdebug_class == NULL) {
+            // The VMDebug class isn't available. We don't need to do anything.
+            LOG_MISC(("dalvik.system.VMDebug does not seem to be available on this runtime."));
+            // Get rid of the ClassNotFoundException.
+            JNI_FUNC_PTR(env,ExceptionClear)(env);
+            goto finish;
+        }
+
+        JNINativeMethod methods[3];
+
+        // Take over the implementation of these three functions.
+        methods[0].name = "lastDebuggerActivity";
+        methods[0].signature = "()J";
+        methods[0].fnPtr = (void*)VMDebug_lastDebuggerActivity;
+
+        methods[1].name = "isDebuggingEnabled";
+        methods[1].signature = "()Z";
+        methods[1].fnPtr = (void*)VMDebug_isDebuggingEnabled;
+
+        methods[2].name = "isDebuggerConnected";
+        methods[2].signature = "()Z";
+        methods[2].fnPtr = (void*)VMDebug_isDebuggerConnected;
+
+        jint res = JNI_FUNC_PTR(env,RegisterNatives)(env,
+                                                     vmdebug_class,
+                                                     methods,
+                                                     sizeof(methods) / sizeof(JNINativeMethod));
+        if (res != JNI_OK) {
+            EXIT_ERROR(JVMTI_ERROR_INTERNAL,
+                       "RegisterNatives returned failure for VMDebug class");
+        }
+
+        finish: ;
+    } END_WITH_LOCAL_REFS(env);
+}
+```
+
+看起来可能是将某个 so 注入到目标进程中，然后重新 register JNI 方法。
+
+### 注入 agent
+
+系统提供了机制，可以直接在启动 activity 的时候注入一个 so ，这被称为 agent 。
+
+这个 agent 实际上是 java 的规范 jvmti。
+
+[JVM(TM) Tool Interface 1.2.3](https://docs.oracle.com/javase/8/docs/platform/jvmti/jvmti.html)
+
+agent 有以下接口函数：
+
+```
+Agent_OnLoad
+Agent_OnAttach
+Agent_OnUnload
+```
+
+……
+
+ART 实现的 jvmti ：
+
+```
+ActivityThread.handleAttachAgent -> VMDebug.attachAgent -> Runtime::Current()->AttachAgent
+art/runtime/ti/agent.cc
+```
+
+[ART TI  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/core/runtime/art-ti?hl=zh-cn)
+
+上面提到的 oj-libjdwp 实际上就是一个 agent 。
+
+`external/oj-libjdwp/src/share/back/debugInit.-c`
+
