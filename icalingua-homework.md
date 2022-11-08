@@ -228,3 +228,22 @@ Menu 似乎对所有 browserWindow 实例都是一样的，不过 click 有个�
 ## 后记
 
 上面的代码不久后我就 [PR](https://github.com/Icalingua-plus-plus/Icalingua-plus-plus/pull/359) 了，原仓库维护者爽快地[接受](https://github.com/Icalingua-plus-plus/Icalingua-plus-plus/commit/0d38ab6d171abbd02c4d5595f7d73f723121e9d3)了（同时那个恶臭数字 UA 也引来不少人吐槽）；尽管我的 pr 引入了一些乱七八糟的修改（比如增加了前进后退的菜单），但维护者仍然耐心地帮我改掉了，并换了更好的实现，甚至把我没实现的「下载统计数据」「查看图片」都做出来了，在这里谢谢 Icalingua 的维护者了。
+
+# 群公告
+
+## 确认收到
+
+目前 icalingua 没法确认收到，但似乎只要注入 cookie 是 qun.qq.com 而非 web.qun.qq.com 就能收到了。
+
+## 发送公告
+
+CDP 找到 Android 发送公告的页面
+
+`https://web.qun.qq.com/mannounce/edit.html?&_wv=5127#gc={}&role=2`
+
+发送按钮放在了 QQ 内置浏览器的 UI 上，需要实现 api `mqq.ui.setTitleButtons`
+
+# TODO
+
+1. 打开群作业后过一段时间（一天以上？）有时候无法加载；发现是添加的 session cookie 出现了重复的 key ，暂时不知道什么原因。  
+2. 之前发了一个「修复群公告无法确认公告」的 commit ，结果发现还是有问题（尴尬）  

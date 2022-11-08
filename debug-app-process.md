@@ -363,9 +363,9 @@ failed to get reply to handshake packet
 
 ……
 
-## JDWP
+## jdwp-control
 
-JDWP 是一个运行在 adbd 的服务，提供了 unix socket `@jdwp-control`
+jdwp-control 是一个运行在 adbd 的服务，提供了 unix socket `@jdwp-control`
 
 源码：`packages/modules/adb/daemon/jdwp_service.cpp`
 

@@ -401,17 +401,7 @@ input 和 include ，前者支持 非 .tex 结尾的文件。
 \catcode`#=11
 \catcode`!=6
 
-
-\newcommand{\mymacro}[1]{%
-  \newcommand{\myinnermacro}[1]{%
-    Outer: !1
-
-    Inner: !!1
-  } 
-
-  \myinnermacro{\textbf{!1}}
-}
-
+...
 
 \begin{document}
 \mymacro{\LaTeX\ is beautiful}
