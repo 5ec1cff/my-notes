@@ -180,14 +180,16 @@ exec /system/bin/app_process $java_options -Djava.class.path=./ash.apk / five.ec
 
 既然这样，就把 suspend 改成 n ，然后我们手动调用 `Debug.waitForDebugger()` ，这样总算可以启动了，但是 AS 仍然无法识别进程。
 
-注意到普通 app 权限会打出这一条 log ：
+~~注意到普通 app 权限会打出这一条 log ：~~
 
 ```
 07-18 21:42:25.992 18150 18150 D AndroidRuntime: Calling main entry five.ec1cff.ash.Main
 07-18 21:42:38.459 18150 18158 E app_process: failed to connect to jdwp control socket: Connection refused
 ```
 
-看起来普通 app 权限不能用 jdwp socket ，切换到 root 就没有问题，然而 AS 还是无法识别。
+~~看起来普通 app 权限不能用 jdwp socket ，切换到 root 就没有问题，然而 AS 还是无法识别。~~
+
+> 2022.11.09 实际上普通 app 的权限完全可以访问 jdwp-control 。这个 Connection refused 大概是重启 adbd 的时候短时间连接不上导致的。
 
 我又检查了 debug 构建的 shizuku demo ，它的 userservice 是可以被识别的。
 
@@ -819,5 +821,413 @@ art/runtime/ti/agent.cc
 
 上面提到的 oj-libjdwp 实际上就是一个 agent 。
 
-`external/oj-libjdwp/src/share/back/debugInit.-c`
+`external/oj-libjdwp/src/share/back/debugInit.c`
+
+## 调试功能的开启
+
+上面的研究仅仅是基于实验观察的，下面我们深入源码看一看 App 是如何开启调试的。
+
+### 从 Manifest 的 debuggable 到 Zygote
+
+……
+
+### Zygote runtimeFlags
+
+Zygote 启动参数中有一个 runtimeFlags 
+
+在 Java 中定义：
+
+```java
+// frameworks/base/core/java/com/android/internal/os/Zygote.java
+public final class Zygote {
+    /*
+    * Bit values for "runtimeFlags" argument.  The definitions are duplicated
+    * in the native code.
+    */
+
+    /** enable debugging over JDWP */
+    public static final int DEBUG_ENABLE_JDWP   = 1;
+    /** enable JNI checks */
+    public static final int DEBUG_ENABLE_CHECKJNI   = 1 << 1;
+    /** enable Java programming language "assert" statements */
+    public static final int DEBUG_ENABLE_ASSERT     = 1 << 2;
+    /** disable the AOT compiler and JIT */
+    public static final int DEBUG_ENABLE_SAFEMODE   = 1 << 3;
+    /** Enable logging of third-party JNI activity. */
+    public static final int DEBUG_ENABLE_JNI_LOGGING = 1 << 4;
+    // ...
+```
+
+native 中定义：
+
+```cpp
+// frameworks/base/core/jni/com_android_internal_os_Zygote.cpp
+// Must match values in com.android.internal.os.Zygote.
+enum RuntimeFlags : uint32_t {
+    DEBUG_ENABLE_JDWP = 1,
+    PROFILE_SYSTEM_SERVER = 1 << 14,
+    PROFILE_FROM_SHELL = 1 << 15,
+    MEMORY_TAG_LEVEL_MASK = (1 << 19) | (1 << 20),
+    MEMORY_TAG_LEVEL_TBI = 1 << 19,
+    MEMORY_TAG_LEVEL_ASYNC = 2 << 19,
+    MEMORY_TAG_LEVEL_SYNC = 3 << 19,
+    GWP_ASAN_LEVEL_MASK = (1 << 21) | (1 << 22),
+    GWP_ASAN_LEVEL_NEVER = 0 << 21,
+    GWP_ASAN_LEVEL_LOTTERY = 1 << 21,
+    GWP_ASAN_LEVEL_ALWAYS = 2 << 21,
+    NATIVE_HEAP_ZERO_INIT_ENABLED = 1 << 23,
+    PROFILEABLE = 1 << 24,
+};
+```
+
+其中 DEBUG_ENABLE_JDWP 就是使能调试的 flag 。
+
+### ZygoteHooks
+
+在 Zygote 的任何 fork 和 specialize 完成后，会调用 dalvik.system.ZygoteHooks 。
+
+```cpp
+// frameworks/base/core/jni/com_android_internal_os_Zygote.cpp
+static void SpecializeCommon(/* */) {
+    // ...
+    env->CallStaticVoidMethod(gZygoteClass, gCallPostForkChildHooks, runtime_flags, is_system_server, is_child_zygote, managed_instruction_set);
+    // ...
+}
+```
+
+```java
+// This function is called from native code in com_android_internal_os_Zygote.cpp
+    @SuppressWarnings("unused")
+    private static void callPostForkChildHooks(int runtimeFlags, boolean isSystemServer,
+            boolean isZygote, String instructionSet) {
+        ZygoteHooks.postForkChild(runtimeFlags, isSystemServer, isZygote, instructionSet);
+    }
+
+// libcore/dalvik/src/main/java/dalvik/system/ZygoteHooks.java
+    public static void postForkChild(int runtimeFlags, boolean isSystemServer,
+            boolean isChildZygote, String instructionSet) {
+        nativePostForkChild(token, runtimeFlags, isSystemServer, isChildZygote, instructionSet);
+        // ...
+    }
+```
+
+```cpp
+// art/runtime/native/dalvik_system_ZygoteHooks.cc
+static void ZygoteHooks_nativePostForkChild(/* ... */) {
+  // ...
+  runtime_flags = EnableDebugFeatures(runtime_flags);
+  // ...
+}
+
+static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
+  // ...
+  Dbg::SetJdwpAllowed((runtime_flags & DEBUG_ENABLE_JDWP) != 0);
+  runtime_flags &= ~DEBUG_ENABLE_JDWP;
+  // ...
+}
+
+// art/runtime/debugger.cc
+void Dbg::SetJdwpAllowed(bool allowed) {
+  gJdwpAllowed = allowed;
+}
+
+bool Dbg::IsJdwpAllowed() {
+  return gJdwpAllowed;
+}
+```
+
+上面设置了 gJdwpAllowed ，此外还调用了 `art::Runtime::InitNonZygoteOrPostFork`
+
+```cpp
+// art/runtime/native/dalvik_system_ZygoteHooks.cc
+static void ZygoteHooks_nativePostForkChild(/* ... */) {
+  if (instruction_set != nullptr && !is_system_server) {
+    ScopedUtfChars isa_string(env, instruction_set);
+    InstructionSet isa = GetInstructionSetFromString(isa_string.c_str());
+    Runtime::NativeBridgeAction action = Runtime::NativeBridgeAction::kUnload;
+    if (isa != InstructionSet::kNone && isa != kRuntimeISA) {
+      action = Runtime::NativeBridgeAction::kInitialize;
+    }
+    runtime->InitNonZygoteOrPostFork(env, is_system_server, is_zygote, action, isa_string.c_str());
+  } else {
+    runtime->InitNonZygoteOrPostFork(
+        env,
+        is_system_server,
+        is_zygote,
+        Runtime::NativeBridgeAction::kUnload,
+        /*isa=*/ nullptr,
+        profile_system_server);
+  }
+}
+
+void Runtime::InitNonZygoteOrPostFork(/* ... */) {
+    // ...
+    GetRuntimeCallbacks()->StartDebugger();
+}
+```
+
+这个函数最终调用了一个 StartDebugger 。
+
+> 顺带一提，InitNonZygoteOrPostFork 也会在 app_process 非 zygote 模式启动时调用，发生在 Runtime::Start
+
+```cpp
+bool Runtime::Start() {
+  // ...
+  if (!is_zygote_) {
+    if (is_native_bridge_loaded_) {
+      PreInitializeNativeBridge(".");
+    }
+    NativeBridgeAction action = force_native_bridge_
+        ? NativeBridgeAction::kInitialize
+        : NativeBridgeAction::kUnload;
+    InitNonZygoteOrPostFork(self->GetJniEnv(),
+        /* is_system_server= */ false,
+        /* is_child_zygote= */ false,
+        action,
+        GetInstructionSetString(kRuntimeISA));
+        // ...
+  }
+}
+```
+
+### AdbConnection
+
+RuntimeCallbacks 定义了一些回调，其中有 DdmCallback  、DebuggerControlCallback
+
+art 中的 **libadbconnection** 插件(plugin) 负责处理连接到 adbd ，并实现上面的回调接口。
+
+> art plugin 相关代码：art/runtime/plugin.cc  
+> 插件是一个 native lib ，入口函数为 `ArtPlugin_Initialize`
+
+**Ddm**: Dalvik Debug Monitor ，DdmCallback 将 Ddm 消息发送到 DDMS 。
+
+**DDMS** (Dalvik Debug Monitor Server) 可以理解为调试器。
+
+通过 adbd 和 libadbconnection ，我们可以在 debuggable 进程和调试器间建立连接。(`adb forward tcp:<port> jdwp:<pid>`)
+
+> 「DDM」和「DDMS」这两个缩写名字，似乎是 ART 还没有取代 dalvik 前的历史遗留产物。相关文档：  
+> https://android.googlesource.com/platform/dalvik.git/+/android-4.2.2_r1/docs/debugger.html  
+> https://developer.android.com/studio/profile/monitor  
+
+DebuggerControlCallback 处理调试的启动和停止。
+
+```cpp
+// art/runtime/runtime_callbacks.h
+class DdmCallback {
+ public:
+  virtual ~DdmCallback() {}
+  virtual void DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+};
+
+class DebuggerControlCallback {
+ public:
+  virtual ~DebuggerControlCallback() {}
+
+  // Begin running the debugger.
+  virtual void StartDebugger() = 0;
+  // The debugger should begin shutting down since the runtime is ending. This is just advisory
+  virtual void StopDebugger() = 0;
+
+  // This allows the debugger to tell the runtime if it is configured.
+  virtual bool IsDebuggerConfigured() = 0;
+};
+```
+
+```cpp
+// art/runtime/runtime_callbacks.cc
+```
+
+有 DebuggerControllerCallback
+
+
+```cpp
+// art/adbconnection/adbconnection.h
+static constexpr char kJdwpControlName[] = "\0jdwp-control";
+// The default jdwp agent name.
+static constexpr char kDefaultJdwpAgentName[] = "libjdwp.so";
+// art/adbconnection/adbconnection.cc
+static std::optional<AdbConnectionState> gState;
+// 入口函数，初始化 gState AdbConnectionState
+// The plugin initialization function.
+extern "C" bool ArtPlugin_Initialize() {
+  DCHECK(art::Runtime::Current()->GetJdwpProvider() == art::JdwpProvider::kAdbConnection);
+  // TODO Provide some way for apps to set this maybe?
+  gState.emplace(kDefaultJdwpAgentName);
+  return ValidateJdwpOptions(art::Runtime::Current()->GetJdwpOptions());
+}
+
+// 设置 DebuggerControlCallback 回调
+AdbConnectionState::AdbConnectionState(const std::string& agent_name) {
+  // ...
+  art::Runtime::Current()->GetRuntimeCallbacks()->AddDebuggerControlCallback(&controller_);
+}
+```
+
+实现的 `DebuggerControlCallback::StartDebugger` ：
+
+```cpp
+// art/adbconnection/adbconnection.cc
+
+// 取决于 runtime flags ，在 ZygoteHooks 设置过了
+static bool IsDebuggingPossible() {
+  return art::Dbg::IsJdwpAllowed();
+}
+
+// Begin running the debugger.
+void AdbConnectionDebuggerController::StartDebugger() {
+  // The debugger thread is started for a debuggable or profileable-from-shell process.
+  // The pid will be send to adbd for adb's "track-jdwp" and "track-app" services.
+  // The thread will also set up the jdwp tunnel if the process is debuggable.
+  if (IsDebuggingPossible() || art::Runtime::Current()->IsProfileableFromShell()) {
+    connection_->StartDebuggerThreads();
+  } else {
+    LOG(ERROR) << "Not starting debugger since process cannot load the jdwp agent.";
+  }
+}
+```
+
+这会启动线程，并连接到 jdwp-control socket ，与 adbd 建立联系。
+
+> packages/modules/adb/libs/adbconnection/adbconnection_client.cpp
+
+### DdmHandleAppName
+
+ActivityThread attach -> AMS bindApplication
+
+```java
+// frameworks/base/core/java/android/app/ActivityThread.java
+    private void handleBindApplication(AppBindData data) {
+        // ...
+        android.ddm.DdmHandleAppName.setAppName(data.processName,
+            data.appInfo.packageName,
+            UserHandle.myUserId());
+    }
+
+
+// frameworks/base/core/java/android/ddm/DdmHandleAppName.java
+    public static void setAppName(String name, int userId) {
+        setAppName(name, name, userId);
+    }
+    
+    public static void setAppName(String appName, String pkgName, int userId) {
+        if (appName == null || appName.isEmpty() || pkgName == null || pkgName.isEmpty()) return;
+
+        sNames = new Names(appName, pkgName);
+
+        // if DDMS is already connected, send the app name up
+        sendAPNM(appName, pkgName, userId);
+    }
+
+    /**
+     * Send an APNM (APplication NaMe) chunk.
+     */
+    private static void sendAPNM(String appName, String pkgName, int userId) {
+        ByteBuffer out = ByteBuffer.allocate(
+            4 /* appName's length */
+            + appName.length() * 2 /* appName */
+            + 4 /* userId */
+            + 4 /* pkgName's length */
+            + pkgName.length() * 2 /* pkgName */);
+        out.order(ChunkHandler.CHUNK_ORDER);
+        out.putInt(appName.length());
+        putString(out, appName);
+        out.putInt(userId);
+        out.putInt(pkgName.length());
+        putString(out, pkgName);
+
+        Chunk chunk = new Chunk(CHUNK_APNM, out);
+        DdmServer.sendChunk(chunk);
+    }
+
+// libcore/dalvik/src/main/java/org/apache/harmony/dalvik/ddmc/DdmServer.java
+    public static void sendChunk(Chunk chunk) {
+        nativeSendChunk(chunk.type, chunk.data, chunk.offset, chunk.length);
+    }
+```
+
+进入 native:
+
+```cpp
+// art/runtime/native/org_apache_harmony_dalvik_ddmc_DdmServer.cc
+static void DdmServer_nativeSendChunk(JNIEnv* env, jclass, jint type,
+                                      jbyteArray javaData, jint offset, jint length) {
+  ScopedFastNativeObjectAccess soa(env);
+  ScopedByteArrayRO data(env, javaData);
+  DCHECK_LE(offset + length, static_cast<int32_t>(data.size()));
+  ArrayRef<const uint8_t> chunk(reinterpret_cast<const uint8_t*>(&data[offset]),
+                                static_cast<size_t>(length));
+  Runtime::Current()->GetRuntimeCallbacks()->DdmPublishChunk(static_cast<uint32_t>(type), chunk);
+}
+```
+
+也是调用 RuntimeCallbacks ，最终发送到 AdbConnection 的 DdmCallback 中
+
+### adbconnection
+
+`art/adbconnection/adbconnection.cc`
+
+adbconnection 运行了一个线程处理 socket， 处理逻辑在 `AdbConnectionState::RunPollLoop` 。
+
+这个线程会反复尝试连接到 adbd (`SetupAdbConnection`)，确保 adbd 重启后 app 进程的调试仍然可用，连接到后会进一步进行 poll 。
+
+AdbConnectionState 结构体包含 4 个 socket fd ，其中通过 poll 轮询 3 个 fd ，下面介绍一下：
+
+```cpp
+// art/adbconnection/adbconnection.h
+  // Context which wraps the socket which we use to talk to adbd.
+  std::unique_ptr<AdbConnectionClientContext, void(*)(AdbConnectionClientContext*)> control_ctx_;
+
+  // Socket that we use to talk to the agent (if it's loaded).
+  android::base::unique_fd local_agent_control_sock_;
+
+  // The fd of the socket the agent uses to talk to us. We need to keep it around in order to clean
+  // it up when the runtime goes away.
+  android::base::unique_fd remote_agent_control_sock_;
+
+  // The fd that is forwarded through adb to the client. This is guarded by the
+  // adb_write_event_fd_.
+  android::base::unique_fd adb_connection_socket_;
+```
+
+**control_ctx_**: libadb 提供的结构体 `AdbConnectionClientContext` ，包含了和 adbd 的 `jdwp-control` 连接的 socket 。
+
+该 socket 连接建立后，立即向 adbd 汇报 `ProcessInfo` 。
+
+```cpp
+// packages/modules/adb/libs/adbconnection/adbconnection_client.cpp
+AdbConnectionClientContext* adbconnection_client_new(/* */) {
+  // ...
+  sockaddr_un addr = {};
+  addr.sun_family = AF_UNIX;
+  memcpy(addr.sun_path, kJdwpControlName, sizeof(kJdwpControlName));
+  size_t addr_len = offsetof(sockaddr_un, sun_path) + sizeof(kJdwpControlName) - 1;
+
+  int rc = connect(ctx->control_socket_.get(), reinterpret_cast<sockaddr*>(&addr), addr_len);
+  // ...
+    ProcessInfo process(*pid, *debuggable, *profileable, *architecture);
+  rc = TEMP_FAILURE_RETRY(write(ctx->control_socket_.get(), &process, sizeof(process)));
+  if (rc != sizeof(process)) {
+    PLOG(ERROR) << "failed to send JDWP process info to adbd";
+  }
+
+  return ctx.release();
+}
+```
+
+**adb_connection_socket_**: 从 adbd 发送过来的 socket pair 的一端，是 adb forward 的 socket 。目前的实现是独占式的，即只允许一个 adb_connection_socket_ ，多余的会自动断开。这个 socket 存在的时候，control_ctx 上的内容不会被读取。
+
+adb_connection_socket_ 会处理 Ddm 命令(`HandleDataWithoutAgent`)，如果无法处理，则认为此 socket 需要给 agent 使用，它的 fd 会 dup 后发送给 remote_agent_control_sock_ (`SendAgentFds`)。
+
+**local_agent_control_sock_** 和 **remote_agent_control_sock_** ：一对 SocketPair ，用于和 agent lib （也就是 jvmti）通信。前者用于写入控制信息和 fd (`SendAgentFds`)给后者，后者的 fd 号通过参数传给 agent lib ，在 agent 中使用。
+
+> 明明在同一个进程居然还要用 socketpair ，也挺奇怪的
+
+`AttachJdwpAgent` 函数会附加 agent ，调用 `MakeAgentArg` 产生参数，最后使用 `art::Runtime::AttachAgent` 附加。
+
+### adbd 的 jdwp service
+
+packages/modules/adb/daemon/jdwp_service.cpp
+
+packages/modules/adb/libs/adbconnection/adbconnection_server.cpp
 
