@@ -8,7 +8,9 @@
 2. magisk 引入了大量外部依赖，直接把 magisk 代码复制到另一个项目，维护起来有一定难度。  
 3. magisk 内部的基础设施更加完善，操作起来比自己造的模块会更方便。  
 
-因此觉得直接修改 magisk 源码或许会更好（于是成为了 magisk 分支 maru）。
+因此觉得直接修改 magisk 源码或许会更好。
+
+代码开源在[这里](https://github.com/5ec1cff/Magisk/tree/maru)，这仅仅是一个实验品，因此不会发布任何 release （~~不过似乎已经有第三方 Magisk 拿去合了？~~）。
 
 ## Native Bridge 加载器  
 
@@ -120,11 +122,11 @@ bool LoadNativeBridge(const char* nb_library_filename,
 }
 ```
 
-native bridge 需要一个特殊的接口 `NativeBridgeItf` ，如果 dlopen 失败或者 dlsym 这个接口失败，都会卸载我们的 native bridge ，实际上这利于我们的隐藏，因为不像 LD_PRELOAD 难以主动卸载自身。
+native bridge 需要一个特殊的符号 `NativeBridgeItf` ，如果 dlopen 失败或者 dlsym 这个符号失败，都会卸载我们的 native bridge ，实际上这利于我们的隐藏，因为不像 LD_PRELOAD 难以主动卸载自身。
 
 ### 实例分析：Riru
 
-Riru 注入 zygote 是通过 native bridge 实现的，但它并不依赖 native bridge 提供的接口，仅仅是将其作为加载的工具人。下面我们来分析一下：
+Riru 注入 zygote 是通过 native bridge 实现的，但它并不依赖 native bridge 提供的符号，仅仅是将其作为加载的工具人。下面我们来分析一下：
 
 Riru 生成了一个 libriruloader.so ，作为 magisk 模块挂载到 `/system/lib(64)` 用于进一步加载。
 
@@ -136,7 +138,7 @@ extern "C" [[gnu::visibility("default")]] uint8_t NativeBridgeItf[
         sizeof(NativeBridgeCallbacks<__ANDROID_API_R__>) * 2]{0};
 ```
 
-这个接口实际上是一个结构体 `NativeBridgeCallbacks` ，声明于 `art/libnativebridge/include/nativebridge/native_bridge.h` ，随着 Android 版本更新会逐渐升级接口版本，增加更多内容，它的第一个字段是版本号：
+这个符号实际上是一个结构体 `NativeBridgeCallbacks` ，声明于 `art/libnativebridge/include/nativebridge/native_bridge.h` ，随着 Android 版本更新会逐渐升级符号版本，增加更多内容，它的第一个字段是版本号：
 
 ```cpp
 // Native bridge interfaces to runtime.
@@ -145,7 +147,7 @@ struct NativeBridgeCallbacks {
   uint32_t version;
 ```
 
-而 riru 默认情况下直接全部填 0 ，实际上就阻止了系统调用接口中的函数，loader 会被直接卸载，不过由于 loader 是被 dlopen 的，因此 constructor 仍然会被调用，在 constructor 中可以执行任意代码，自然也可以 dlopen 其他库，并且不会被关闭。
+而 riru 默认情况下直接全部填 0 ，实际上就阻止了系统调用符号中的函数，loader 会被直接卸载，不过由于 loader 是被 dlopen 的，因此 constructor 仍然会被调用，在 constructor 中可以执行任意代码，自然也可以 dlopen 其他库，并且不会被关闭。
 
 riru 通过 socket 的方式与 rirud 守护进程通信，在 loader 中会读取原始的 native bridge ，如果存在，会尝试 dlopen 这个 native bridge ，并直接复制它的 NativeBridgeItf 给自己，这样系统就能加载原始的 native bridge 了。
 
@@ -241,7 +243,9 @@ getprop persist.device_config.runtime_native.usap_pool_enabled
 setprop persist.device_config.runtime_native.usap_pool_enabled true
 ```
 
-在创建 usap 之前就已经加载了 native bridge 。USAP 仅仅是 zygote 的 fork ，也就是说其中不会重启 runtime ，也不会重新加载 native bridge 。
+~~在创建 usap 之前就已经加载了 native bridge 。USAP 仅仅是 zygote 的 fork ，也就是说其中不会重启 runtime ，也不会重新加载 native bridge 。~~
+
+（待考证）
 
 ## hook JNI  
 
@@ -293,9 +297,9 @@ void hook_functions() {
 }
 ```
 
-首先尝试用 xhook hook `libandroid_runtime.so` 的 `jniRegisterNativeMethods` ，这个在高版本的 Android 一般是行不通的（？），于是转而使用 fallback 方案，这个方案就比较有意思了。
+首先尝试用 xhook hook `libandroid_runtime.so` 的 `jniRegisterNativeMethods` ，如果失败，还有一个 fallback 方案：hook `app_process` 的 `android::AndroidRuntime::setArgv0` 。
 
-首先 hook `app_process` 的 `android::AndroidRuntime::setArgv0` ：
+前者的目的比较显然，我们来分析一下后者：
 
 ```cpp
 // This method is a trampoline for swizzling android::AppRuntime vtable
@@ -422,7 +426,7 @@ void onVmCreated(void *self, JNIEnv* env) {
 
 onVmCreated 的参数中包含了 JNIEnv 指针，系统类的 jni 函数注册都通过这个 env 注册，因此我们可以替换掉它的 `env->functions` 中的 `RegisterNatives` ，实现 hook jni 函数的注册。
 
-### NB 能否像 zygisk 一样 hook ？
+### NB 加载的 maru 能否像 zygisk 一样 hook ？
 
 zygisk 绕了一个大弯路，总算是 hook 到 JNI 注册了，那么这个方法是否还适用于 native bridge 的注册呢？
 
@@ -641,7 +645,7 @@ class JNI {
 }
 ```
 
-### 为什么那么麻烦呢？
+### 为什么需要 fallback
 
 看了 Zygisk 和 Riru 的 hook ，虽然有一定差别，但大体上思路是相同的：首先尝试 plt hook `libandroid_runtime.so` 对 `jniRegisterNativeMethods` 的调用，如果失败，就尝试替换 JNIEnv 的函数表。
 
@@ -796,9 +800,9 @@ cc_library_static {
 
 Riru 对该变化引入的提交(2021/3/1)：[Prepare for libnativehelper_lazy · RikkaApps/Riru@5b6113d](https://github.com/RikkaApps/Riru/commit/5b6113d59ebf8744aebede5e9382c7a3ae7ddcd1)
 
-> riru 早期的 hook 逻辑写在 `main.cpp`
+> riru 早期的 hook 逻辑写在 `main.cpp`，现在已经移除，因此找起来很麻烦。
 
-因此这部分逻辑完全是为了适配 Android 12 以上而编写的。
+可见 fallback 方案是为了适配 Android 12 以上版本。
 
 ### 总结
 
@@ -917,7 +921,7 @@ int wait_for_file(const char* filename, std::chrono::nanoseconds timeout) {
 
 此外入口放在了 zygisk_main ，这又是一个大坑，因为 zygisk main 必须要 argv0 为空才能进入，而基础设施里面没有直接执行的方法（唯一用到的地方是 zygiskd ，在这里有 exec 的实现，但是没封装），只好自己造了。
 
-#### Riru 方案的大坑
+#### 直接使用 Riru 方案的大坑
 
 上面分析到 zygisk 原来的 hook setArgv0 作为跳板 hook onVmCreated 的方法不适用，因此采用 Riru 方案，使用 `setTableOverride` hook JNI 函数，然而实际尝试却发现是一个大坑。
 
@@ -979,7 +983,7 @@ Abort message: 'JNI DETECTED ERROR IN APPLICATION: java_class == null
 
 注意到原来的实现中，hook RegisterNative 发生在 onVmCreated ，因为只有这时候才能拿到 JNIEnv 。而我们现在的 hook 发生在 Runtime::Init 调用还未结束的时候。
 
-看一看 Java 基础库的方法什么时候 register 的：
+看一看 framework.jar 的 native 方法什么时候 register 的：
 
 ```cpp
 // art/runtime/native/java_lang_Class.cc
@@ -1259,7 +1263,7 @@ app 权限只能读取到自己的日志，不过可以读取同一 uid 存在�
 
 ## 细节
 
-前面的工作成功地实现了使用 nb 注入 zygisk ，并且得到了和原版 zygisk 效果一致的版本，还具有更高的隐蔽性（能通过 momo）。
+前面的工作成功地实现了使用 native bridge 加载 zygisk ，还通过了 momo 的检测。
 
 现在该考虑一些细节问题。
 
