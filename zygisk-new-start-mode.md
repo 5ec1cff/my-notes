@@ -4,14 +4,14 @@
 
 最近总算[配置好了](build-magisk-on-windows.md)在 windows 上开发 magisk 的环境，下面让我们试试吧！
 
-下文以 zygisked-app_process 称呼被 magisk 修改后的 app_process （本质上就是 magisk 主程序）
+下文以 app_process wrapper 称呼被 magisk 修改后的 app_process （本质上就是 magisk 主程序）
 
 ## 尝试一
 
 一开始的思路是：
 
 ```
-exec zygisked-app_process -> umount zygisked-app_process -> exec orig app_process
+exec app_process wrapper -> umount app_process wrapper -> exec orig app_process
 ```
 
 失败。linker 提示 appwidget 无法链接到 app_process
@@ -24,7 +24,7 @@ exec zygisked-app_process -> umount zygisked-app_process -> exec orig app_proces
 
 不过再仔细一看，其实是 appwidget 链接到 app_process 出现了问题。
 
-研究了一下源码，发现现在的加载机制改了：一阶段是一个独立的 zygisk-loader.so ，编译好后包含在 magisk 程序的一个数组里面。在 zygisked-app_process 启动的时候发送给 magiskd ，然后接收并 mount 到 HIJACK_BIN 目录（64 位是 /system/bin/appwidget ，32 位是 /system/bin/bu ）。LD_PRELOAD 设置为 HIJACK_BIN ，随后 fexecve 执行原 app_process 。一阶段 loader 中会 dlopen `/system/bin/app_process` ，此处是强制重新打开(android_dlopen_ext flags=`ANDROID_DLEXT_FORCE_LOAD`)，因为这个 app_process 实际上是 zygisked-app_process ，二阶段的入口就包含在里面。
+研究了一下源码，发现现在的加载机制改了：一阶段是一个独立的 zygisk-loader.so ，编译好后包含在 magisk 程序的一个数组里面。在 app_process wrapper 启动的时候发送给 magiskd ，然后接收并 mount 到 HIJACK_BIN 目录（64 位是 /system/bin/appwidget ，32 位是 /system/bin/bu ）。LD_PRELOAD 设置为 HIJACK_BIN ，随后 fexecve 执行原 app_process 。一阶段 loader 中会 dlopen `/system/bin/app_process` ，此处是强制重新打开(android_dlopen_ext flags=`ANDROID_DLEXT_FORCE_LOAD`)，因为这个 app_process 实际上是 app_process wrapper ，二阶段的入口就包含在里面。
 
 而现在的问题就是 dlopen 出现了问题，至于为何打开原 app_process 会出现 namespace 的问题暂不追究，至少如果这个 app_process 是「zygisked」的，就能打开。
 
@@ -67,7 +67,7 @@ open files:
 
 这次尝试不 umount ，而是直接把 orig app_process 又挂到原目录上，相当于挂了三层，进入之后再 umount 。
 
-这样 linker 的问题也没了，但是 hook 却无法生效。检查发现，本应 hook app_process 的 setArgv0 却没 hook 到，导致后面的工作都无法进行；进一步发现，maps 中名为 app_process 的内存是 zygisked-app_process 的，而真正的 app_process 名字却是 `/` （只能通过 inode 号查找了），由于 xhook 搜索 so 是通过 maps 进行的，这就导致无法找到正确的 app_process 。
+这样 linker 的问题也没了，但是 hook 却无法生效。检查发现，本应 hook app_process 的 setArgv0 却没 hook 到，导致后面的工作都无法进行；进一步发现，maps 中名为 app_process 的内存是 app_process wrapper 的，而真正的 app_process 名字却是 `/` （只能通过 inode 号查找了），由于 xhook 搜索 so 是通过 maps 进行的，这就导致无法找到正确的 app_process 。
 
 > 对比了一下，正常执行的 zygisk ，在内存里面应该会有两个 app_process 文件的映射 **（这样真的不会对 xhook 有问题吗？）**
 
@@ -75,7 +75,7 @@ open files:
 
 ## 终极尝试
 
-看上去叠加 mount 并不好，最好还是 umount 掉 zygisked-app_process ，execve orig，然后在 loader 中请求 magiskd mount zygisked-app_process （因为 zygote 自己无法 mount）。
+看上去叠加 mount 并不好，最好还是 umount 掉 app_process wrapper ，execve orig，然后在 loader 中请求 magiskd mount app_process wrapper （因为 zygote 自己无法 mount）。
 
 不过 loader 是独立于 magisk 其他部分的，写起来、调试起来并不方便，不过最后还是写出了一个可行的版本。
 
@@ -87,7 +87,7 @@ loader 中连接 magiskd socket 请求 mount ，这里也采用了 patch 方法�
 
 考虑到在 loader 中和 magiskd 通信较为麻烦，而且这样不可避免地要增加 Request code ，而这部分位于 C++ ，code 写在 enum 里面，不太好迁移到 C ，于是干脆使用更加原始的通信机制——信号。
 
-具体思路是：zygisked-app_process 将自己的某个信号阻塞，然后请求 magiskd umount zygisked-app_process ，发送 loader 后不 close socket，直接 exec 。对面 magiskd read 等待回应，如果发现连接断开，认为 zygote 已经 exec （假如 exec 失败，zygisked-app_process 会回应，以分辨是否成功），mount zygisked-app_process 并发送信号给 zygote ，此时 loader 使用 sigsuspend 等待信号到来，之后直接执行 loader 逻辑。
+具体思路是：app_process wrapper 将自己的某个信号阻塞，然后请求 magiskd umount app_process wrapper ，发送 loader 后不 close socket，直接 exec 。对面 magiskd read 等待回应，如果发现连接断开，认为 zygote 已经 exec （假如 exec 失败，app_process wrapper 会回应，以分辨是否成功），mount app_process wrapper 并发送信号给 zygote ，此时 loader 使用 sigsuspend 等待信号到来，之后直接执行 loader 逻辑。
 
 观察 zygote 的 SIGBLK ，发现 SIGUSR1 一般是 blocked 的，因此适合作为我们需要的信号。
 
