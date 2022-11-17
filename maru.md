@@ -1,8 +1,8 @@
-# maru
+# maru：基于 Native Bridge 的 zygisk
 
-越来越感觉到 Zygisk 目前的原理不适合隐藏，反而是 Riru 的隐藏更为简单，于是突发奇想，能不能用 Riru 的加载方式加载我们的代码，然后在其中加载 Zygisk 模块呢？
+越来越感觉到 Zygisk 目前的原理不适合隐藏，反而是 Riru 的隐藏更为简单，于是突发奇想，能不能用 Riru 的加载方式，也就是 Native Bridge ，加载 Zygisk 及其模块呢？
 
-起初想通过一个 magisk 模块实现（~~maru~~），但实际尝试后，考虑到下面几个原因：
+起初想通过一个 magisk 模块实现，但实际尝试后，考虑到下面几个原因：
 
 1. zygisk 被禁用后 zygisk 模块都不会被 magisk 加载，导致不仅要自己加载模块的 so ，还要自己处理 mount 和 props 。  
 2. magisk 引入了大量外部依赖，直接把 magisk 代码复制到另一个项目，维护起来有一定难度。  
@@ -10,7 +10,25 @@
 
 因此觉得直接修改 magisk 源码或许会更好。
 
-代码开源在[这里](https://github.com/5ec1cff/Magisk/tree/maru)，这仅仅是一个实验品，因此不会发布任何 release （~~不过似乎已经有第三方 Magisk 拿去合了？~~）。
+于是诞生了 maru ，名字的含义是 MAgisk + riRU 。代码开源在[这里](https://github.com/5ec1cff/Magisk/tree/maru)。
+
+maru 仅仅是一个实验品，因此我不会发布任何 release ，将来继续维护的可能性也不大。
+
+> ~~不过似乎已经有第三方 Magisk 拿去用了？~~
+
+maru 实现得 zygisk 理论上支持大部分 zygisk 模块。**由于修改了内部实现，因此一些依赖 zygisk 内部实现的<ruby>模块<rt>Shamiko</rt></ruby>可能无法正常使用。**
+
+> 实际上这个修改的 magisk 已经在我的手机上运行了一个多月了，使用 LSPosed、Sui、Clipboard Whitelist 基本上没什么大问题。由于我没有其他 zygisk 模块，因此其他的模块会怎么样我就不知道了。
+
+下面我将分析 riru 和 zygisk 的实现，以及 maru 是如何将它们~~缝合~~起来的。
+
+## 参考资料
+
+[topjohnwu/Magisk: The Magic Mask for Android](https://github.com/topjohnwu/Magisk)
+
+[RikkaApps/Riru: Inject into zygote process](https://github.com/RikkaApps/Riru)
+
+[通过系统的native bridge实现注入zygote - 残页的小博客](https://blog.canyie.top/2020/08/18/nbinjection/)
 
 ## Native Bridge 加载器  
 
@@ -249,9 +267,9 @@ setprop persist.device_config.runtime_native.usap_pool_enabled true
 
 ## hook JNI  
 
-注入 Zygote 后一般要 hook JNI 的 RegisterNativeMethods ，以便我们得到 `com.android.internal.app.Zygote` 的 native 函数指针，进而 hook 它的关键方法。
+当我们成功注入 Zygote 后，为了在 fork app 进程的时候取得关键信息，一般要 hook JNI 的 RegisterNativeMethods ，以便我们得到 `com.android.internal.os.Zygote` 等类的 native 函数指针，进而 hook 它的关键方法。
 
-### Zygisk 是怎么 hook jni 注册的  
+### Zygisk 的实现
 
 Zygisk 的实现如下： 
 
@@ -426,11 +444,11 @@ void onVmCreated(void *self, JNIEnv* env) {
 
 onVmCreated 的参数中包含了 JNIEnv 指针，系统类的 jni 函数注册都通过这个 env 注册，因此我们可以替换掉它的 `env->functions` 中的 `RegisterNatives` ，实现 hook jni 函数的注册。
 
-### NB 加载的 maru 能否像 zygisk 一样 hook ？
+### NB 加载能否使用 zygisk 的 hook 方案？
 
 zygisk 绕了一个大弯路，总算是 hook 到 JNI 注册了，那么这个方法是否还适用于 native bridge 的注册呢？
 
-回顾 native bridge 的加载，位于 `Runtime::Init` 。看一看如何从 AndroidRuntime 到 Runtime ：
+回顾 native bridge 的加载，位于 `Runtime::Init` 。看一看如何从 `AndroidRuntime::start` 到 `Runtime::Init` 发生了什么 ：
 
 ```cpp
 // frameworks/base/core/jni/AndroidRuntime.cpp
@@ -503,7 +521,7 @@ bool Runtime::Create(RuntimeArgumentMap&& runtime_options) {
 }
 ```
 
-由此可见，顺序是 `AndroidRuntime::setArgv0` -> `AndroidRuntime::start` -> 加载 native bridge ，因此这个阶段注入必然不能用 zygisk 的方法 hook 到。
+由此可见，调用顺序是 `AndroidRuntime::setArgv0` -> `AndroidRuntime::start` -> 加载 native bridge 。由于 setArgv0 调用先于 native bridge 加载，因此使用 native bridge 加载就不能用 zygisk 的方法 hook 了。
 
 > 实际上，native bridge 注入后可以用 `getprogname` 得到自己的名字 (`zygote`) ，riru 中就有这样的代码，因此更说明了 setArgv0 在加载 native bridge 之前调用。
 
@@ -577,16 +595,14 @@ void jni::InstallHooks() {
 }
 ```
 
-一开始也是在 `libandroid_runtime.so` 寻找 `jniRegisterNativeMethods` 。
-
-如果失败，则会寻找 `libart.so` 的镜像，并查找下面这两个符号：
+一开始也是在 `libandroid_runtime.so` 寻找 `jniRegisterNativeMethods` 。如果失败，则会寻找 `libart.so` 的镜像，并查找下面这两个符号：
 
 ```cpp
 art::GetJniNativeInterface()
 art::JNIEnvExt::SetTableOverride(JNINativeInterface const*)
 ```
 
-此处用了 SandHook 的 ElfImg ，它会解析 maps ，并直接打开 `libart.so` 文件，解析符号。
+Riru 使用了 SandHook 的 ElfImg ，它会解析 maps ，并直接打开 `libart.so` 的文件，解析符号找到地址。
 
 ```
 $ readelf -s /apex/com.android.art/lib64/libart.so -W | grep _ZN3art21GetJniNativeInterfaceEv
@@ -597,7 +613,7 @@ $ readelf -s /apex/com.android.art/lib64/libart.so -W | grep _ZN3art9JNIEnvExt16
  24338: 000000000038e900   232 FUNC    GLOBAL PROTECTED   14 _ZN3art9JNIEnvExt16SetTableOverrideEPK18JNINativeInterface
 ```
 
-两个函数的声明如下：
+这两个函数可以用于替换 JNI 函数表，声明如下：
 
 ```cpp
 // art/runtime/jni/jni_internal.h
@@ -664,8 +680,7 @@ int register_com_android_internal_os_Zygote(JNIEnv* env) {
 }
 
 // frameworks/base/core/jni/core_jni_helpers.h
-static inline int RegisterMethodsOrDie(JNIEnv* env, const char* className,
-                                       const JNINativeMethod* gMethods, int numMethods) {
+static inline int RegisterMethodsOrDie(JNIEnv* env, const char* className, const JNINativeMethod* gMethods, int numMethods) {
     int res = AndroidRuntime::registerNativeMethods(env, className, gMethods, numMethods);
     LOG_ALWAYS_FATAL_IF(res < 0, "Unable to register native methods.");
     return res;
@@ -675,8 +690,7 @@ static inline int RegisterMethodsOrDie(JNIEnv* env, const char* className,
 /*
  * Register native methods using JNI.
  */
-/*static*/ int AndroidRuntime::registerNativeMethods(JNIEnv* env,
-    const char* className, const JNINativeMethod* gMethods, int numMethods)
+/*static*/ int AndroidRuntime::registerNativeMethods(JNIEnv* env, const char* className, const JNINativeMethod* gMethods, int numMethods)
 {
     return jniRegisterNativeMethods(env, className, gMethods, numMethods);
 }
@@ -812,7 +826,7 @@ Zygisk 中替换 JNIEnv 的方案无法适用于 native bridge 加载，考虑�
 
 ### 0x01 作为 magisk 模块实现
 
-作为 magisk 模块实现，首先有一个最重要的问题，就是 Magisk 的 Zygisk 开关应该是开还是关。
+作为 magisk 模块实现有一个问题，就是 Magisk 的 Zygisk 开关应该是开还是关。
 
 如果关，那么 zygisk 模块不会被加载，一切都需要自己处理，这自然是很麻烦的。
 
@@ -911,15 +925,15 @@ int wait_for_file(const char* filename, std::chrono::nanoseconds timeout) {
 
 如果像原来一样把 zygisk-ld 存在 magisk 里面，那么挂载 zygisk loader 也麻烦。但是 magisk 内要包含所有架构的 zygisk-ld 。
 
-此外直接存在 magisk 里面，也要考虑容易被内存扫描到的问题（如果要模仿 riru 行为，不卸载模块而隐藏的情况下）
+> 此外直接存在 magisk 里面，也要考虑容易被内存扫描到的问题（如果要模仿 riru 行为，不卸载模块而隐藏的情况下）
 
 ……
 
-既然是修改代码，那么还是一步一步来，zygisk-ld 先不动，仍然存放在 magisk 里面，然后在 magic mount 增加注入 zygisk lib 的逻辑，把 zygisk-ld 和 magisk 作为 libzygisk 作为内建模块挂载到 `/system/lib(64)` 上。
+于是决定一步一步来。zygisk-ld 先不动，仍然存放在 magisk 里面，然后在 magic mount 增加注入 zygisk lib 的逻辑，把 zygisk-ld 和 magisk 作为 libzygisk 作为内建模块挂载到 `/system/lib(64)` 上。
 
 而 zygisk-ld 就直接从 magisk 中释放出来，具体方法是 main 增加一个入口，然后 write zygisk_ld 到指定路径，这样需要我们在 magiskd exec 执行 magisk64 和 magisk32 。
 
-此外入口放在了 zygisk_main ，这又是一个大坑，因为 zygisk main 必须要 argv0 为空才能进入，而基础设施里面没有直接执行的方法（唯一用到的地方是 zygiskd ，在这里有 exec 的实现，但是没封装），只好自己造了。
+此外入口放在了 zygisk_main ，这又是一个大坑，因为 zygisk main 必须要 argv0 为空才能进入，而 magisk 源码里面没有封装直接执行的方法（唯一用到的地方是 zygiskd ，在这里有 exec 的实现，但是没封装），只好自己造了。
 
 #### 直接使用 Riru 方案的大坑
 
@@ -973,13 +987,13 @@ Abort message: 'JNI DETECTED ERROR IN APPLICATION: java_class == null
 
 看报错，一开始是 `Class.getName` 的 native 方法找不到，而下面是一长串的 `nativeFillInStackTrace` 未注册。
 
-检查 Zygisk 代码，发现是有一个 `get_class_name` 函数，每次注册 native methods 的时候都会根据传入的 jclass 获取 class name ，而获取方法正是 jni 反射调用 Class.getName 。
+检查 Zygisk 代码，发现有一个 `get_class_name` 函数，每次注册 native methods 的时候都会根据传入的 jclass 获取类名，而获取方法正是 jni 反射调用 Class.getName 。
 
-为什么要用 Class.getName ？因为 JNI 似乎没有直接获取 jclass 的类名的方法……（jclass 本质还是 jobject ，是一个 Class 对象）
+为什么要调用 java 层的 Class.getName ？因为 JNI 没有直接获取 jclass 的类名的方法……（jclass 本质还是 jobject ，是一个 Class 对象）
 
-看上去我们 hook RegisterNative ，首次调用的时候 Class.getName 甚至还没注册， `Throwable.nativeFillInStackTrace` 也没有注册，导致 jni 调用的过程中出现异常。
+因此，看上去我们 hook 了 RegisterNative ，首次调用的时候 `Class.getName`, `Throwable.nativeFillInStackTrace` 这些 native 方法甚至还没有注册，导致 jni 调用的过程中出现异常。
 
-但是我们都是替换了 env RegisterNatives ，为什么 zygisk 原来的实现没问题呢？
+但是，既然 maru 和 zygisk 都是替换了 `env->RegisterNatives` ，为什么 zygisk 原来的实现没问题呢？
 
 注意到原来的实现中，hook RegisterNative 发生在 onVmCreated ，因为只有这时候才能拿到 JNIEnv 。而我们现在的 hook 发生在 Runtime::Init 调用还未结束的时候。
 
@@ -995,10 +1009,7 @@ void register_java_lang_Class(JNIEnv* env) {
 #define REGISTER_NATIVE_METHODS(jni_class_name) \
   RegisterNativeMethodsInternal(env, (jni_class_name), gMethods, arraysize(gMethods))
 
-ALWAYS_INLINE inline void RegisterNativeMethodsInternal(JNIEnv* env,
-                                                        const char* jni_class_name,
-                                                        const JNINativeMethod* methods,
-                                                        jint method_count) {
+ALWAYS_INLINE inline void RegisterNativeMethodsInternal(JNIEnv* env, const char* jni_class_name, const JNINativeMethod* methods, jint method_count) {
   ScopedLocalRef<jclass> c(env, env->FindClass(jni_class_name));
   if (c.get() == nullptr) {
     LOG(FATAL) << "Couldn't find class: " << jni_class_name;
@@ -1006,8 +1017,6 @@ ALWAYS_INLINE inline void RegisterNativeMethodsInternal(JNIEnv* env,
   jint jni_result = env->RegisterNatives(c.get(), methods, method_count);
   CHECK_EQ(JNI_OK, jni_result);
 }
-
-
 
 // art/runtime/runtime.cc
 void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
@@ -1038,9 +1047,20 @@ void Runtime::InitNativeMethods() {
   WellKnownClasses::Init(env);
   // ...
 }
+
+bool Runtime::Start() {
+  // ...
+  // InitNativeMethods needs to be after started_ so that the classes
+  // it touches will have methods linked to the oat file if necessary.
+  {
+    ScopedTrace trace2("InitNativeMethods");
+    InitNativeMethods();
+  }
+  // ...
+}
 ```
 
-发生在 `Runtime::InitNativeMethods` ，这个方法又被 `Runtime::Start` 调用，发生在 Init 之后，也就是 loadNativeBridge 之后。当然，发生在 onVmCreated 之前。
+`Runtime::InitNativeMethods` 注册了一系列原生方法，这个方法又被 `Runtime::Start` 调用，发生在 `Runtime::Init` 之后，也就是 loadNativeBridge 之后。当然，这些都发生在 `AndroidRuntime::onVmCreated` 之前，因此 zygisk 的 hook 被调用到的时候，所有基础类都准备好了（Zygote 相关类则是在后面的过程注册的）。
 
 那么 Riru 为什么也没事呢？因为 Riru 并不用这个方法判断是 Zygote 的类注册，它获取了一个 Zygote class 的全局引用，然后比对传入的 jclass 和这个全局引用是不是一个对象。
 
@@ -1226,7 +1246,7 @@ void Init(void *handle) {
 
 > 并且，在我常用的系统上用的是 zygisk + shamiko 的组合，目前已经无法阻止被 momo 「检测到 zygisk」，并且**在一段时间内**除了首次启动 momo 不会「汇报注入」，其他时候都会汇报。说明这个特征还具有时效性。
 
-### native bridge ？
+### native bridge props ？
 
 能够跨越重启保留的有 props ，但是之前用 riru 和自己写的 native bridge 测试注入都不会报这个的。
 
@@ -1336,3 +1356,5 @@ setArgv0 应该发生在 wait zygote 之后，不过实现起来比较麻烦，�
 1. zygote 对 system_file 有 read 和 lock 权限，但是没有 write ，因此发送一个 WRONLY 的过去并设置写锁是不允许的，只好设置读锁，而 magiskd 一侧要设置写锁才能进入冲突等待的状态。 
 2. 获取锁的线程设置了较高的优先级。  
 3. zygote 需要持有这个锁文件，但是由于 zygote fd 泄露检测机制的存在（发生在 fork 前），无法正常产生 app 进程；因此我们让 zygote 再 fork 一个 holder 进程，由这个进程设置并持有文件锁，这样原 zygote 就不需要持有文件了，并且设置 prctl PR_SET_PDEATHSIG ，确保 zygote 死亡的时候我们的 holder 也能死亡并通知 magiskd 。  
+
+> 上面的实现个人觉得仍然不算完美，~~不过能用就行~~
