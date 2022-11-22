@@ -148,9 +148,8 @@ AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.72 MQQBrowse
 
 未完成： `//qun.qq.com/homework/features/answer.html?_wv=1027#group_id=xxxxx&hw_id=xxxxx&hw_type=0`
 
-已完成：`//qun.qq.com/homework/features/v2/feedback.html?_wv=16778243&_bid=3089&gc=417205913&hw_id=xxxxx&isAdmin=0&uin=xxxxx&course_name=xxxxx&originalRole=335`
+已完成：`//qun.qq.com/homework/features/v2/feedback.html?_wv=16778243&_bid=3089&gc=xxxxx&hw_id=xxxxx&isAdmin=0&uin=xxxxx&course_name=xxxxx&originalRole=335`
 
-> 保护隐私 url 参数部分内容被隐去
 
 再看 PC 端的，它会重定向到 `https://qun.qq.com/homework/p/features/index.html#/detail?` ，实际上是只要 UA 不含 `_SQ_` 就会重定向。
 
@@ -165,7 +164,7 @@ AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.72 MQQBrowse
 因此最终思路就是：
 
 ```js
-await mwin.loadURL('https://qun.qq.com/homework/p/features#?gid=417205913', {userAgent:"QQ/"})
+await mwin.loadURL('https://qun.qq.com/homework/p/features#?gid=xxxxx', {userAgent:"QQ/"})
 // 注入 js 到 qun.qq.com 域名
 window.external.openWebWindow=(d)=>{console.log(d);location.href=JSON.parse(d).url;}
 ```

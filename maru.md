@@ -12,11 +12,11 @@
 
 于是诞生了 maru ，名字的含义是 MAgisk + riRU 。代码开源在[这里](https://github.com/5ec1cff/Magisk/tree/maru)。
 
-maru 仅仅是一个实验品，因此我不会发布任何 release ，将来继续维护的可能性也不大。
+maru 仅仅是一个 PoC 。我不会发布任何 release 。如果没有新的想法，继续维护的可能性也不大。
 
 > ~~不过似乎已经有第三方 Magisk 拿去用了？~~
 
-maru 实现得 zygisk 理论上支持大部分 zygisk 模块。**由于修改了内部实现，因此一些依赖 zygisk 内部实现的<ruby>模块<rt>Shamiko</rt></ruby>可能无法正常使用。**
+maru 实现的 zygisk 理论上支持大部分 zygisk 模块。**由于修改了内部实现，因此一些依赖 zygisk 内部实现的<ruby>模块<rt>Shamiko</rt></ruby>可能无法正常使用。**
 
 > 实际上这个修改的 magisk 已经在我的手机上运行了一个多月了，使用 LSPosed、Sui、Clipboard Whitelist 基本上没什么大问题。由于我没有其他 zygisk 模块，因此其他的模块会怎么样我就不知道了。
 
