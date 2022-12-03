@@ -81,3 +81,11 @@ EOF
 看起来现在这个状况要配置新用户挺麻烦的，不知道有什么未知后果，反正这个 `pi` 用户也不是不能用。
 
 至于那个 banner ，干脆修改 `/etc/ssh/sshd_config.d/rename_user.conf` 把它注释掉，然后 `systemctl --quiet reload ssh`
+
+## 配置时区
+
+挂了一天脚本，发现 crontab 没有正确执行，原来是时区没设置
+
+[TimeZoneChanges - Debian Wiki](https://wiki.debian.org/TimeZoneChanges#Check_Configured_Timezone)
+
+debian 使用 `dpkg-reconfigure tzdata` 配置时区，选择「chongqing」（不知道为什么没有 Beijing ，但是有 Shanghai, Chongqing, Hong Kong）

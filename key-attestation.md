@@ -237,4 +237,40 @@ fun runBinderProxy(arg: ArgParser) {
 
 上面的代码可以代理在 servicemanager 注册的 binder 服务，并观察 transaction ，打印 calling pid 。
 
-这在 AVD Android 12 可用，在朋友的 MIUI (Android 12) 手机上也可用，但唯独我自己的 MIUI (Android 11) 始终没法代理到服务，而 addService 的过程并没有报错，目前暂时不清楚原因，也许这个版本魔改了 servicemanager 。
+这在 AVD Android 12 可用，在朋友的 MIUI (Android 12) 手机上也可用，但唯独我自己的 MIUI (Android 11) 始终没法代理到服务，而 addService 的过程并没有报错。
+
+于是搜了一下源码，发现 Android 11 addService 的时候用的是 `map::emplace` ，这样如果服务存在不会发生替换，后来又被改成直接替换了。在 Android 11 以前也是会替换的，似乎只有这一个版本不行。
+
+```cpp
+// Android 11
+// https://cs.android.com/android/platform/superproject/+/android-11.0.0_r1:frameworks/native/cmds/servicemanager/ServiceManager.cpp;l=216;drc=e192a6721d3812c73cdee58bd775f6a489c7d844
+    auto entry = mNameToService.emplace(name, Service {
+        .binder = binder,
+        .allowIsolated = allowIsolated,
+        .dumpPriority = dumpPriority,
+        .debugPid = ctx.debugPid,
+    });
+
+// https://cs.android.com/android/platform/superproject/+/master:frameworks/native/cmds/servicemanager/ServiceManager.cpp;l=378;drc=ce94b75b68df3e07e9c73d42eaa59cfce0929e53
+    // Overwrite the old service if it exists
+    mNameToService[name] = Service{
+            .binder = binder,
+            .allowIsolated = allowIsolated,
+            .dumpPriority = dumpPriority,
+            .ctx = ctx,
+    };
+
+// Android 10
+// https://cs.android.com/android/platform/superproject/+/android-10.0.0_r27:frameworks/native/cmds/servicemanager/service_manager.c;l=229;drc=5516d77f61c0553f20b7332842863bc511a97074
+    si = find_svc(s, len);
+    if (si) {
+        if (si->handle) {
+            ALOGE("add_service('%s',%x) uid=%d - ALREADY REGISTERED, OVERRIDE\n",
+                 str8(s, len), handle, uid);
+            svcinfo_death(bs, si);
+        }
+        si->handle = handle;
+    } else {
+```
+
+
