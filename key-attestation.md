@@ -109,12 +109,26 @@ libcore/ojluni/src/main/java/java/security/Provider.java
 libcore/ojluni/src/main/java/java/security/KeyStoreSpi.java
 ```
 
-Android 的实现(现在是 Keystore2)：
+Android 的实现：
+
+KeyStore2 (Android 12)
 
 ```
 frameworks/base/keystore/java/android/security/KeyStore2.java
 frameworks/base/keystore/java/android/security/keystore2/AndroidKeyStoreSpi.java
 frameworks/base/keystore/java/android/security/keystore2/AndroidKeyStoreProvider.java
+
+system/hardware/interfaces/keystore2/aidl/android/system/keystore2/IKeystoreService.aidl
+```
+
+KeyStore(Android 11):
+
+```
+frameworks/base/keystore/java/android/security/keystore/AndroidKeyStore.java
+frameworks/base/keystore/java/android/security/keystore/AndroidKeyStoreSpi.java
+
+system/security/keystore/binder/android/security/keystore/IKeystoreService.aidl
+frameworks/base/keystore/java/android/security/KeyStore.java
 ```
 
 binder 服务 IKeystoreService 由 /system/bin/keystore 实现。
@@ -135,6 +149,158 @@ system/hardware/interfaces/keystore2/aidl/android/system/keystore2/IKeystoreServ
 system/security/keystore2/src/service.rs
 
 system/security/keystore/
+```
+
+[android-key-attestation/Constants.java at master · google/android-key-attestation](https://github.com/google/android-key-attestation/blob/master/server/src/main/java/com/google/android/attestation/Constants.java)
+
+## 过程
+
+```kt
+// app/src/main/java/io/github/vvb2060/keyattestation/home/HomeViewModel.kt
+    private fun doAttestation(alias: String, useStrongBox: Boolean, includeProps: Boolean
+    ): AttestationResult {
+        val certs: Array<X509Certificate?>?
+        val attestation: Attestation
+        val isGoogleRootCertificate: Boolean
+        try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+            generateKey(alias, useStrongBox, includeProps)
+            val certificates = keyStore.getCertificateChain(alias)
+            certs = arrayOfNulls(certificates.size)
+            for (i in certs.indices) certs[i] = certificates[i] as X509Certificate
+        } catch (e: ProviderException) {
+```
+
+### generateKey
+
+```kt
+    private fun generateKey(alias: String, useStrongBox: Boolean, includeProps: Boolean) {
+        val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
+        val now = Date()
+        val originationEnd = Date(now.time + 1000000)
+        val consumptionEnd = Date(now.time + 2000000)
+        val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                .setKeyValidityStart(now)
+                .setKeyValidityForOriginationEnd(originationEnd)
+                .setKeyValidityForConsumptionEnd(consumptionEnd)
+                .setAttestationChallenge(now.toString().toByteArray())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && includeProps) {
+            builder.setDevicePropertiesAttestationIncluded(true)
+        }
+        if (Build.VERSION.SDK_INT >= 28 && useStrongBox) {
+            builder.setIsStrongBoxBacked(true)
+        }
+        builder.setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256)
+        keyPairGenerator.initialize(builder.build())
+        keyPairGenerator.generateKeyPair()
+    }
+```
+
+首先需要用 AndroidKeyStore 生成一个密钥对，并给它指定一个别名 (alias) 。AndroidKeystore 会使用 keymaster 生成密钥对，如果使用硬件，具体的实现取决于厂商。
+
+密钥对是一个 `java.security.KeyPair` 对象，包含一个 `PrivateKey` 和一个 `PublicKey` ，通过 AndroidKeyStore 生成的 `PrivateKey` 无法直接获取其密钥的字节（`getEncoded` 返回 null），即私钥存储在 Keystore 中，不能直接取出。
+
+```
+frameworks/base/keystore/java/android/security/keystore/AndroidKeyStorePrivateKey.java
+frameworks/base/keystore/java/android/security/keystore/AndroidKeyStorePublicKey.java
+frameworks/base/keystore/java/android/security/keystore/AndroidKeyStoreKey.java
+```
+
+通过 setAttestationChallenge 指定了一个 KeyAttestation 的 challenge ，这样得到的公钥的证书信息就会包含一个扩展字段，包含了我们需要的 Root Of Trust 等信息。
+
+此处用的是日期的字符串字节作为 challenge 。
+
+> If attestationChallenge is not null, the public key certificate for this key pair will contain an extension that describes the details of the key's configuration and authorizations, including the attestationChallenge value. If the key is in secure hardware, and if the secure hardware supports attestation, the certificate will be signed by a chain of certificates rooted at a trustworthy CA key. Otherwise the chain will be rooted at an untrusted certificate.
+
+> [KeyPairGenerator](https://developer.android.com/reference/java/security/KeyPairGenerator)  
+> [KeyGenParameterSpec.Builder](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder)  
+
+## verifyCertificateChain
+
+我们要用别名从 AndroidKeyStore 取出刚才生成的密钥对的证书链。
+
+验证证书链是否合法，并确定是否是 google 签名的根证书
+
+```kt
+        try {
+            isGoogleRootCertificate = VerifyCertificateChain.verifyCertificateChain(certs)
+        } catch (e: GeneralSecurityException) {
+```
+
+具体方法就是从根证书开始，用每个证书的公钥验证对下一级证书的签名（根证书也要验证自己的签名）
+
+还要检查根证书是否来自 google 。
+
+```kt
+    public static boolean verifyCertificateChain(X509Certificate[] certs)
+            throws GeneralSecurityException {
+        X509Certificate parent = certs[certs.length - 1];
+        var context = AppApplication.getApp().getApplicationContext();
+        var stream = context.getResources().openRawResource(R.raw.status);
+        JsonObject entries = CertificateRevocationStatus.parseStatus(stream);
+        for (int i = certs.length - 1; i >= 0; i--) {
+            X509Certificate cert = certs[i];
+            cert.checkValidity();
+            cert.verify(parent.getPublicKey());
+            parent = cert;
+            var certStatus = CertificateRevocationStatus.decodeStatus(cert.getSerialNumber(), entries);
+            if (certStatus != null) {
+                throw new CertificateException("Certificate revocation status is " + certStatus.status);
+            }
+        }
+        var X509Factory = CertificateFactory.getInstance("X.509");
+        var root = certs[certs.length - 1].getTBSCertificate();
+        for (String certificate : GOOGLE_ROOT_CERTIFICATES) {
+            var inStream = new ByteArrayInputStream(certificate.getBytes(UTF_8));
+            var secureRoot = (X509Certificate) X509Factory.generateCertificate(inStream);
+            if (Arrays.equals(secureRoot.getTBSCertificate(), root)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+### Attestation
+
+Attestation 的内容在证书链的第一个 X509 证书的扩展字段，使用 ASN.1 格式存储
+
+[ASN.1入门（超详细） - 知乎](https://zhuanlan.zhihu.com/p/156898176)
+
+```java
+// app/src/main/java/io/github/vvb2060/keyattestation/attestation/Attestation.java
+    public Attestation(X509Certificate x509Cert) throws CertificateParsingException {
+        ASN1Sequence seq = getAttestationSequence(x509Cert);
+        unexpectedExtensionOids = retrieveUnexpectedExtensionOids(x509Cert);
+
+        attestationVersion = Asn1Utils.getIntegerFromAsn1(seq.getObjectAt(ATTESTATION_VERSION_INDEX));
+        attestationSecurityLevel = Asn1Utils.getIntegerFromAsn1(seq.getObjectAt(ATTESTATION_SECURITY_LEVEL_INDEX));
+        keymasterVersion = Asn1Utils.getIntegerFromAsn1(seq.getObjectAt(KEYMASTER_VERSION_INDEX));
+        keymasterSecurityLevel = Asn1Utils.getIntegerFromAsn1(seq.getObjectAt(KEYMASTER_SECURITY_LEVEL_INDEX));
+
+        attestationChallenge =
+                Asn1Utils.getByteArrayFromAsn1(seq.getObjectAt(Attestation.ATTESTATION_CHALLENGE_INDEX));
+
+        uniqueId = Asn1Utils.getByteArrayFromAsn1(seq.getObjectAt(Attestation.UNIQUE_ID_INDEX));
+
+        softwareEnforced = new AuthorizationList(seq.getObjectAt(SW_ENFORCED_INDEX));
+        teeEnforced = new AuthorizationList(seq.getObjectAt(TEE_ENFORCED_INDEX));
+    }
+
+    static final String KEY_DESCRIPTION_OID = "1.3.6.1.4.1.11129.2.1.17";
+
+    private ASN1Sequence getAttestationSequence(X509Certificate x509Cert)
+            throws CertificateParsingException {
+        byte[] attestationExtensionBytes = x509Cert.getExtensionValue(KEY_DESCRIPTION_OID);
+        if (attestationExtensionBytes == null || attestationExtensionBytes.length == 0) {
+            throw new CertificateParsingException(
+                    "Did not find extension with OID " + KEY_DESCRIPTION_OID);
+        }
+        return Asn1Utils.getAsn1SequenceFromBytes(attestationExtensionBytes);
+    }
 ```
 
 ## 检测应用是否访问 keystore
