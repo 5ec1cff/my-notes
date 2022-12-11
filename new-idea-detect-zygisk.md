@@ -53,7 +53,7 @@ ANDROID_SOCKET_usap_pool_primary=23
 
 LD_PRELOAD, MAGISK_INJ_1 这些都不存在，看起来没问题，真的是这样吗？
 
-我们知道 execve 传入内核的 env 的字符串一般都放在新进程的 stack 上，那么我们 dump 一下（感谢 Mufanc 提供的脚本）：
+我们知道 execve 传入内核的 env 的字符串一般都放在新进程的 stack 上，那么我们 dump 一下（感谢 Shell 语言大佬 Mufanc 提供的脚本）：
 
 ```sh
 # cat /sdcard/Documents/codes/stack.sh
