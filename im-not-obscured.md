@@ -35,8 +35,128 @@ android:filterTouchesWhenObscured="true"
 处理输入的代码被编译在动态库 `libinput.so` 中，input 事件通过 socket 传输(似乎是 binder + socket pair fd)。
 
 ```cpp
+// frameworks/native/include/input/InputTransport.h
 status_t InputPublisher::publishMotionEvent ->
 status_t sendMessage(const InputMessage* msg);
+```
+
+这个函数每个版本的签名几乎都不一样
+
+```cpp
+    // 13
+    status_t publishMotionEvent(uint32_t seq, int32_t eventId, int32_t deviceId, int32_t source,
+                                int32_t displayId, std::array<uint8_t, 32> hmac, int32_t action,
+                                int32_t actionButton, int32_t flags, int32_t edgeFlags,
+                                int32_t metaState, int32_t buttonState,
+                                MotionClassification classification, const ui::Transform& transform,
+                                float xPrecision, float yPrecision, float xCursorPosition,
+                                float yCursorPosition, const ui::Transform& rawTransform,
+                                nsecs_t downTime, nsecs_t eventTime, uint32_t pointerCount,
+                                const PointerProperties* pointerProperties,
+                                const PointerCoords* pointerCoords);
+
+    // 12.1
+    status_t publishMotionEvent(uint32_t seq, int32_t eventId, int32_t deviceId, int32_t source,
+                                int32_t displayId, std::array<uint8_t, 32> hmac, int32_t action,
+                                int32_t actionButton, int32_t flags, int32_t edgeFlags,
+                                int32_t metaState, int32_t buttonState,
+                                MotionClassification classification, const ui::Transform& transform,
+                                float xPrecision, float yPrecision, float xCursorPosition,
+                                float yCursorPosition, uint32_t displayOrientation,
+                                int32_t displayWidth, int32_t displayHeight, nsecs_t downTime,
+                                nsecs_t eventTime, uint32_t pointerCount,
+                                const PointerProperties* pointerProperties,
+                                const PointerCoords* pointerCoords);
+
+    // 12
+    status_t publishMotionEvent(uint32_t seq, int32_t eventId, int32_t deviceId, int32_t source,
+                                int32_t displayId, std::array<uint8_t, 32> hmac, int32_t action,
+                                int32_t actionButton, int32_t flags, int32_t edgeFlags,
+                                int32_t metaState, int32_t buttonState,
+                                MotionClassification classification, const ui::Transform& transform,
+                                float xPrecision, float yPrecision, float xCursorPosition,
+                                float yCursorPosition, int32_t displayWidth, int32_t displayHeight,
+                                nsecs_t downTime, nsecs_t eventTime, uint32_t pointerCount,
+                                const PointerProperties* pointerProperties,
+                                const PointerCoords* pointerCoords);
+
+    // 11
+    status_t publishMotionEvent(uint32_t seq, int32_t eventId, int32_t deviceId, int32_t source,
+                                int32_t displayId, std::array<uint8_t, 32> hmac, int32_t action,
+                                int32_t actionButton, int32_t flags, int32_t edgeFlags,
+                                int32_t metaState, int32_t buttonState,
+                                MotionClassification classification, float xScale, float yScale,
+                                float xOffset, float yOffset, float xPrecision, float yPrecision,
+                                float xCursorPosition, float yCursorPosition, nsecs_t downTime,
+                                nsecs_t eventTime, uint32_t pointerCount,
+                                const PointerProperties* pointerProperties,
+                                const PointerCoords* pointerCoords);
+
+    // 10.0
+    status_t publishMotionEvent(
+            uint32_t seq,
+            int32_t deviceId,
+            int32_t source,
+            int32_t displayId,
+            int32_t action,
+            int32_t actionButton,
+            int32_t flags,
+            int32_t edgeFlags,
+            int32_t metaState,
+            int32_t buttonState,
+            MotionClassification classification,
+            float xOffset,
+            float yOffset,
+            float xPrecision,
+            float yPrecision,
+            nsecs_t downTime,
+            nsecs_t eventTime,
+            uint32_t pointerCount,
+            const PointerProperties* pointerProperties,
+            const PointerCoords* pointerCoords);
+
+    // 9.0, 8.1
+    status_t publishMotionEvent(
+            uint32_t seq,
+            int32_t deviceId,
+            int32_t source,
+            int32_t displayId,
+            int32_t action,
+            int32_t actionButton,
+            int32_t flags,
+            int32_t edgeFlags,
+            int32_t metaState,
+            int32_t buttonState,
+            float xOffset,
+            float yOffset,
+            float xPrecision,
+            float yPrecision,
+            nsecs_t downTime,
+            nsecs_t eventTime,
+            uint32_t pointerCount,
+            const PointerProperties* pointerProperties,
+            const PointerCoords* pointerCoords);
+
+    // 8.0
+    status_t publishMotionEvent(
+            uint32_t seq,
+            int32_t deviceId,
+            int32_t source,
+            int32_t action,
+            int32_t actionButton,
+            int32_t flags,
+            int32_t edgeFlags,
+            int32_t metaState,
+            int32_t buttonState,
+            float xOffset,
+            float yOffset,
+            float xPrecision,
+            float yPrecision,
+            nsecs_t downTime,
+            nsecs_t eventTime,
+            uint32_t pointerCount,
+            const PointerProperties* pointerProperties,
+            const PointerCoords* pointerCoords);
 ```
 
 上面的 publishMotionEvent 符号在 `libinput.so` 被导出，且被 `libinputflinger.so` 引用，可以考虑用 plt hook 。
