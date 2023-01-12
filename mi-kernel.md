@@ -78,6 +78,22 @@ boot 镜像是用 magiskboot 制作的，直接把 kernel, dtb, 原 img 的 ramd
 
 现在这样 10.0.9 + Android 11 dtc 还是没法开机
 
+顺便贴上编译脚本：
+
+```sh
+export ARCH=arm64
+export SUBARCH=arm64
+export DTC_EXT=${PWD}/dtc/dtc
+export CROSS_COMPILE=${PWD}/toolchain/bin/aarch64-linux-android-
+REAL_CC='REAL_CC=${PWD}/toolchains/Snapdragon-LLVM-10.0.9/bin/clang'
+CLANG_T='CLANG_TRIPLE=aarch64-linux-gnu-'
+
+export LOCALVERSION=-g481f117a1553
+
+make O=out $REAL_CC $CLANG_T picasso_user_defconfig
+make -j$(nproc) O=out $REAL_CC $CLANG_T 2>&1 | tee kernel.log
+```
+
 ## 第三方
 
 [使用小米开源代码编译内核卡第一屏 - AKR社区](https://www.akr-developers.com/d/577)
@@ -189,5 +205,76 @@ Linux version 4.19.113-perf-g481f117a1553 (five_ec1cff@xxxxxx) (clang version 10
 ```
 
 WLAN，声音之类的都没问题，其他担心的项目如相机，指纹、存储、TEE 等也都正常，就是速度感觉慢了一些，也许是心理作用，先这么用一晚上看看效果。
+
+新内核运行了一晚上，用起来和以前没什么两样，于是我决定加一些东西
+
+defconfig 里面加上：
+
+```
+CONFIG_KPROBES=y
+CONFIG_UNIX_DIAG=y
+```
+
+同时创建了 git 仓库，注意到这样会自动加上一个 hash 导致模块的 vermagic 又不对了，因此还要加一项：
+
+```
+CONFIG_LOCALVERSION_AUTO=n
+```
+
+编译好了，继续 fastboot boot 启动。然而这个内核并不像原先那么顺利，开机后无法进入系统。一开始是黑屏，怎么按电源键都没响应，后来才出现了 MIUI 图标，说明屏幕没有问题，但仍无法进入系统。
+
+> 值得注意的是此时 scrcpy 能打开，但也是黑屏，这似乎只能证明 system server 和 SurfaceFlinger 正常工作
+
+好在重启到原先的内核还是能正常使用的，重启前记录了 dmesg 和 logcat 。
+
+先看日志，似乎看不出什么问题，于是看一看 tombstone
+
+观察到那次启动后只有一个 tombstone ，是一个 `vendor.qti.hardware.display.composer-service` 进程，看起来与显示相关：
+
+```
+Build fingerprint: 'Redmi/picasso/picasso:11/RKQ1.200826.002/V12.5.7.0.RGICNXM:user/release-keys'
+Revision: '0'
+ABI: 'arm64'
+Timestamp: 2023-01-12 20:08:45+0800
+pid: 934, tid: 2478, name: LTM_THREAD  >>> /vendor/bin/hw/vendor.qti.hardware.display.composer-service <<<
+uid: 1000
+signal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------
+Abort message: 'Attempted to retrieve value from failed HIDL call: Status(EX_TRANSACTION_FAILED): 'DEAD_OBJECT: ''
+    x0  0000000000000000  x1  00000000000009ae  x2  0000000000000006  x3  000000792c7574e0
+    x4  0000000000000000  x5  0000000000000000  x6  0000000000000000  x7  000000000001601c
+    x8  00000000000000f0  x9  14a87dbf0b025cb5  x10 0000000000000000  x11 ffffffc0ffffffdf
+    x12 0000000000000001  x13 0000000000000062  x14 b40000793701b760  x15 0000000000080000
+    x16 00000079bb29c948  x17 00000079bb27b390  x18 000000792bfa4000  x19 00000000000003a6
+    x20 00000000000009ae  x21 00000000ffffffff  x22 000000792c758000  x23 0000000000000000
+    x24 000000792c758000  x25 000000792d9ed970  x26 000000792c758000  x27 000000000000aa40
+    x28 000000792d9ece28  x29 000000792c757560
+    lr  00000079bb22eaa0  sp  000000792c7574c0  pc  00000079bb22eacc  pst 0000000000000000
+
+backtrace:
+      #00 pc 0000000000089acc  /apex/com.android.runtime/lib64/bionic/libc.so (abort+164) (BuildId: a790cdbd8e44ea8a90802da343cb82ce)
+      #01 pc 00000000000062b0  /system/lib64/liblog.so (__android_log_default_aborter+12) (BuildId: 53286795d97fe56c1e70dca740895c84)
+      #02 pc 0000000000012fa4  /apex/com.android.vndk.v30/lib64/libbase.so (android::base::LogMessage::~LogMessage()+320) (BuildId: 80f255c2fa17369bce8002e5e367ad65)
+      #03 pc 0000000000045158  /apex/com.android.vndk.v30/lib64/libhidlbase.so (android::hardware::details::return_status::onValueRetrieval() const+236) (BuildId: 441744a3e8eac97619ec117a3898fc51)
+      #04 pc 000000000008c1ac  /vendor/lib64/libdpps.so (AlsNative::AlsEnable()+368) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #05 pc 00000000000b4214  /vendor/lib64/libdpps.so (DppsAlsSubject::Register(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, DppsNotifyInterface<int>*)+344) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #06 pc 00000000000ec034  /vendor/lib64/libdpps.so (ltmfeature::LtmOff::PostSetParam(LtmSwParams, LtmPayload const&, std::__1::vector<std::__1::function<int ()>, std::__1::allocator<std::__1::function<int ()> > >*, bool*)+768) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #07 pc 00000000000eb708  /vendor/lib64/libdpps.so (ltmfeature::LtmOff::SetParameter(LtmSwParams, LtmPayload const&)+396) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #08 pc 00000000000e3780  /vendor/lib64/libdpps.so (ltmfeature::LtmFeatureImp::SetParameter(LtmSwParams, LtmPayload const&)+116) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #09 pc 00000000000d8ad8  /vendor/lib64/libdpps.so (DppsLtmClientImp::ProcessOnCommand(LTM::LtmCommandPayload<LTM::LtmCommand> const&)+184) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #10 pc 00000000000d792c  /vendor/lib64/libdpps.so (DppsLtmClientImp::HandleQueueMsg(DppsEventRespPayload const&)+240) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #11 pc 00000000000e00fc  /vendor/lib64/libdpps.so (LtmEventImp::HandleQueueMsg()+104) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #12 pc 00000000000e15dc  /vendor/lib64/libdpps.so (LtmEventImp::ProcessNextEvent()+440) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #13 pc 00000000000d6858  /vendor/lib64/libdpps.so (DppsLtmClientImp::Process()+468) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #14 pc 00000000000d6644  /vendor/lib64/libdpps.so (DppsLtmClientImp::thread_handler(DppsLtmClientImp*) (.cfi)+112) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #15 pc 00000000000db01c  /vendor/lib64/libdpps.so (void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void (*)(DppsLtmClientImp*), DppsLtmClientImp*> >(void*) (.cfi)+60) (BuildId: 88e1d2eb7acbab67389d68e0866af277)
+      #16 pc 00000000000eb868  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start(void*)+64) (BuildId: a790cdbd8e44ea8a90802da343cb82ce)
+      #17 pc 000000000008ba88  /apex/com.android.runtime/lib64/bionic/libc.so (__start_thread+64) (BuildId: a790cdbd8e44ea8a90802da343cb82ce)
+```
+
+于是把 `CONFIG_KPROBES=y` 去掉，只保留 `CONFIG_UNIX_DIAG=y`
+
+unix diag 是起作用了（主要就是用来获取 unix socket 的 peer 信息的）。不过观察到开机后软重启了数次，但之后就稳定下来，看日志也没看出有什么问题，tombstone 也没有产生相关的信息。
+
+看来 KPROBES 还是有一些问题
 
 未完待续……
