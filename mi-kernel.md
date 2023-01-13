@@ -275,6 +275,36 @@ backtrace:
 
 unix diag 是起作用了（主要就是用来获取 unix socket 的 peer 信息的）。不过观察到开机后软重启了数次，但之后就稳定下来，看日志也没看出有什么问题，tombstone 也没有产生相关的信息。
 
-看来 KPROBES 还是有一些问题
+于是新的镜像又用了一天，似乎除了开机的时候的软重启再也没有别的问题了。
 
-未完待续……
+当我晚上第二次 boot 那个带有 KPROBES 的镜像后，屏幕又奇迹般地可以正常显示了——难道第一次是概率事件？然而仍然有开机后软重启的问题。
+
+这一次的软重启比往常更加剧烈，并且开机后一些应用工作异常（如 Bilibili 无法打开直播等，表现为打开后就 ANR）。
+
+**但这些问题在最后一次软重启后似乎一切又正常了。**
+
+不过这一次我也有了准备，开机就抓取了日志，直到系统工作正常为止。
+
+下面是第一次软重启(Zygote 重启)，原因是 system_server 死亡
+
+```
+01-13 23:52:24.556   763   763 E Zygote  : Zygote failed to write to system_server FD: Connection refused
+01-13 23:52:24.557   763   763 I Zygote  : Process 1763 exited due to signal 9 (Killed)
+01-13 23:52:24.557  8297  8397 E PowerKeeper.Sensor: setAppSensorsControlPolicyandroid.os.DeadObjectException
+01-13 23:52:24.557   760   770 E IPCThreadState: attemptIncStrongHandle(23): Not supported
+01-13 23:52:24.557   763   763 E Zygote  : Exit zygote because system server (pid 1763) has terminated
+```
+
+而 system_server 死亡的原因竟然是……自杀？
+
+```
+01-13 23:52:23.853  1763  2218 E Watchdog: First set of traces taken from /data/anr/anr_2023-01-13-23-51-43-395
+01-13 23:52:23.899  1763  2218 E Watchdog: Second set of traces taken from /data/anr/anr_2023-01-13-23-52-13-704
+
+01-13 23:52:23.968  1763  2218 E Watchdog: Triggering SysRq for system_server watchdog
+
+01-13 23:52:24.352  1763  2219 D ActivityManager: report kill process: killerPid is:1763, killedPid is:1763
+01-13 23:52:24.353  1763  2219 I Process : Sending signal. PID: 1763 SIG: 9
+```
+
+To be continued
