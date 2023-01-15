@@ -307,4 +307,250 @@ unix diag 是起作用了（主要就是用来获取 unix socket 的 peer 信息
 01-13 23:52:24.353  1763  2219 I Process : Sending signal. PID: 1763 SIG: 9
 ```
 
-To be continued
+
+
+……
+
+同样地，除了开机的几次软重启，之后一直都是稳定运行。
+
+顺便找了个利用 bpf 和 kprobe 的工具测试了一下，看起来也能正常使用。
+
+[Kr328/file-monitor: A simple cli tool to monitor the file opening of application processes.](https://github.com/Kr328/file-monitor)
+
+![](res/images/20230114_01.png)
+
+
+之前的日志还不足以说明问题，于是我决定再重启一次，这次用 `logcat -b all` 抓取所有 buffers 的日志，以及 `dmesg` 。
+
+此外还准备了一个 Xposed 模块，hook `ActivityManagerService.reportKillProcessEvent` （也就是那个自杀日志产生的方法，hook 仅仅是打印了 stack trace 确定来源）
+
+重启后第一次进入系统，并没有很快触发软重启，直到我打开 bilibili 的任意直播间，触发 ANR ，随即重启。
+
+之后在开机动画等待了很长的时间才重新进入系统，最后系统趋于正常。
+
+从 log 找到了两次 system server 自杀，并被我们 hook 到的记录：
+
+```
+01-15 14:35:07.043 10612 10696 I LSPosed-Bridge: Kill self detected
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: java.lang.Throwable
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at five.ec1cff.mysysteminjector.xposed.HookEntry$1.beforeHookedMethod(HookEntry.java:50)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at de.robv.android.xposed.XposedBridge$AdditionalHookInfo.callback(Unknown Source:79)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at LSPHooker_.reportKillProcessEvent(Unknown Source:22)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at java.lang.reflect.Method.invoke(Native Method)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at android.os.ProcessInjector.reportKillProcessEvent(ProcessInjector.java:24)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at android.os.Process.killProcess(Process.java:1146)
+01-15 14:35:07.043 10612 10696 E LSPosed-Bridge: 	at com.android.server.Watchdog.run(Watchdog.java:920)
+01-15 14:33:24.207  1806  2294 D ActivityManager: report kill process: killerPid is:1806, killedPid is:1806
+```
+
+这个自杀确实是从 Watchdog 出来的。
+
+[Android Watchdog机制原理分析_xiaosayidao的博客-CSDN博客_android watchdog原理](https://blog.csdn.net/xiaosayidao/article/details/75453195)
+
+[Documentation/sysrq.txt - kernel/common - Git at Google](https://android.googlesource.com/kernel/common/+/bcmdhd-3.10/Documentation/sysrq.txt)
+
+反编译 framework.jar ，涉及到 `Triggering SysRq for` 的日志（有两处，这三行是一样的）
+
+```java
+// com.android.server.Watchdog
+    Slog.e("Watchdog", "Triggering SysRq for system_server watchdog");
+    this.doSysRq('w');
+    this.doSysRq('l');
+```
+
+```
+'w'	- Dumps tasks that are in uninterruptable (blocked) state.
+'l'     - Shows a stack backtrace for all active CPUs.
+```
+
+```
+01-15 14:33:23.772  1806  2293 E Watchdog: First set of traces taken from /data/anr/anr_2023-01-15-14-32-43-200
+01-15 14:33:23.825  1806  2293 E Watchdog: Second set of traces taken from /data/anr/anr_2023-01-15-14-33-13-555
+
+01-15 14:33:23.883  1806  2293 E Watchdog: Triggering SysRq for system_server watchdog
+01-15 14:33:24.207  1806  2294 D ActivityManager: report kill process: killerPid is:1806, killedPid is:1806
+```
+
+dmesg 中，相近的时间出现了这样的日志（感觉 3s 差得有点远）
+
+```
+[Sun Jan 15 14:33:26 2023] sysrq: Show Blocked State
+[Sun Jan 15 14:33:26 2023] task                        PC stack   pid father
+[Sun Jan 15 14:33:26 2023] sensors@1.0-ser D    0   905      1 0x04000001
+[Sun Jan 15 14:33:26 2023] Call trace:
+[Sun Jan 15 14:33:26 2023] __switch_to+0x13c/0x158
+[Sun Jan 15 14:33:26 2023] __schedule+0xb44/0xd98
+[Sun Jan 15 14:33:26 2023] schedule_preempt_disabled+0x7c/0xa8
+[Sun Jan 15 14:33:26 2023] __mutex_lock+0x444/0x660
+[Sun Jan 15 14:33:26 2023] __mutex_lock_slowpath+0x10/0x18
+[Sun Jan 15 14:33:26 2023] mutex_lock+0x30/0x38
+[Sun Jan 15 14:33:26 2023] kernfs_fop_write+0x100/0x1d0
+[Sun Jan 15 14:33:26 2023] __vfs_write+0x44/0x148
+[Sun Jan 15 14:33:26 2023] vfs_write+0xe0/0x1a0
+[Sun Jan 15 14:33:26 2023] ksys_write+0x6c/0xd0
+[Sun Jan 15 14:33:26 2023] __arm64_sys_write+0x18/0x20
+[Sun Jan 15 14:33:26 2023] el0_svc_common+0x98/0x148
+[Sun Jan 15 14:33:26 2023] el0_svc_handler+0x68/0x80
+[Sun Jan 15 14:33:26 2023] el0_svc+0x8/0xc
+[Sun Jan 15 14:33:26 2023] sysrq: Show backtrace of all active CPUs
+[Sun Jan 15 14:33:26 2023] sysrq: CPU6:
+[Sun Jan 15 14:33:26 2023] Call trace:
+```
+
+看起来很多问题指向了这个进程：905 ，它仍然在系统中运行
+
+```
+system     905     1  0 06:31 ?        00:00:03 /vendor/bin/hw/android.hardware.sensors@1.0-service
+```
+
+dump 出来的两个 ANR 文件
+
+```
+----- Waiting Channels: pid 905 at 2023-01-15 14:33:14 -----
+Cmd line: /vendor/bin/hw/android.hardware.sensors@1.0-service
+
+sysTid=905       kernfs_fop_write
+sysTid=1090      futex_wait_queue_me
+sysTid=1091      futex_wait_queue_me
+sysTid=1092      futex_wait_queue_me
+sysTid=1093      palm_sensor_show
+sysTid=1094      binder_ioctl_write_read
+sysTid=1098      do_sys_poll
+sysTid=2481      diagchar_read
+sysTid=2483      futex_wait_queue_me
+sysTid=2484      futex_wait_queue_me
+sysTid=2485      futex_wait_queue_me
+sysTid=2486      futex_wait_queue_me
+sysTid=2487      futex_wait_queue_me
+sysTid=2735      futex_wait_queue_me
+sysTid=2736      do_sys_poll
+sysTid=2737      do_sigtimedwait
+
+----- end 905 -----
+```
+
+但是仔细查找日志，又发现了别的原因。这里似乎才是 Watchdog 自杀的原因。
+
+
+```
+01-15 14:33:13.178  1806  2294 I watchdog: Blocked in handler on ui thread (android.ui)
+01-15 14:33:13.178  1806  2294 I Watchdog: Reporting stuck state to activity controller
+01-15 14:33:13.178  1806  2294 W Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on ui thread (android.ui)
+01-15 14:33:13.183  1806  2293 I android_os_HwBinder: HwBinder: Starting thread pool for getting: android.hidl.manager@1.0::IServiceManager/default
+01-15 14:33:13.196  1806  2294 W Watchdog: android.ui annotated stack trace:
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.os.BinderProxy.transactNative(Native Method)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.os.BinderProxy.transact(BinderProxy.java:540)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.app.IUidObserver$Stub$Proxy.onUidActive(IUidObserver.java:249)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at com.android.server.am.ActivityManagerService.dispatchUidsChangedForObserver(ActivityManagerService.java:3612)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at com.android.server.am.ActivityManagerService.dispatchUidsChanged(ActivityManagerService.java:3551)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at com.android.server.am.ActivityManagerService$UiHandler.handleMessage(ActivityManagerService.java:1791)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.os.Handler.dispatchMessage(Handler.java:106)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.os.Looper.loop(Looper.java:236)
+01-15 14:33:13.197  1806  2294 W Watchdog:     at android.os.HandlerThread.run(HandlerThread.java:67)
+01-15 14:33:13.198  1806  2294 W Watchdog:     at com.android.server.ServiceThread.run(ServiceThread.java:45)
+01-15 14:33:13.198  1806  2294 W Watchdog:     at com.android.server.UiThread.run(UiThread.java:45)
+01-15 14:33:13.198  1806  2294 W Watchdog: *** GOODBYE!
+```
+
+出现了一个诡异问题：IUidObserver 是一个 oneway aidl interface ，但是却阻塞了。
+
+ANR 记录：
+
+```
+"android.ui" prio=5 tid=20 Native
+  | group="main" sCount=1 dsCount=0 flags=1 obj=0x12c02368 self=0xb40000749ebe6c00
+  | sysTid=2288 nice=-2 cgrp=default sched=0/0 handle=0x74470f5cc0
+  | state=S schedstat=( 97450095 123653949 520 ) utm=6 stm=3 core=5 HZ=100
+  | stack=0x7446ff2000-0x7446ff4000 stackSize=1043KB
+  | held mutexes=
+  native: #00 pc 0000000000086b4c  /apex/com.android.runtime/lib64/bionic/libc.so (syscall+28)
+  native: #01 pc 000000000008a734  /apex/com.android.runtime/lib64/bionic/libc.so (__futex_wait_ex(void volatile*, bool, int, bool, timespec const*)+144)
+  native: #02 pc 00000000000ec61c  /apex/com.android.runtime/lib64/bionic/libc.so (NonPI::MutexLockWithTimeout(pthread_mutex_internal_t*, bool, timespec const*)+216)
+  native: #03 pc 000000000002d500  /system/lib64/libsensorservice.so (android::SensorService::onUidStateChanged(unsigned int, android::SensorService::UidState)+148)
+  native: #04 pc 0000000000034c4c  /system/lib64/libsensorservice.so (android::SensorService::UidPolicy::onUidActive(unsigned int)+136)
+  native: #05 pc 0000000000087aa8  /system/lib64/libbinder.so (android::BnUidObserver::onTransact(unsigned int, android::Parcel const&, android::Parcel*, unsigned int)+344)
+  native: #06 pc 000000000004982c  /system/lib64/libbinder.so (android::BBinder::transact(unsigned int, android::Parcel const&, android::Parcel*, unsigned int)+232)
+  native: #07 pc 000000000012b13c  /system/lib64/libandroid_runtime.so (android_os_BinderProxy_transact(_JNIEnv*, _jobject*, int, _jobject*, _jobject*, int)+304)
+  at android.os.BinderProxy.transactNative(Native method)
+  at android.os.BinderProxy.transact(BinderProxy.java:540)
+  at android.app.IUidObserver$Stub$Proxy.onUidActive(IUidObserver.java:249)
+  at com.android.server.am.ActivityManagerService.dispatchUidsChangedForObserver(ActivityManagerService.java:3612)
+  at com.android.server.am.ActivityManagerService.dispatchUidsChanged(ActivityManagerService.java:3551)
+  at com.android.server.am.ActivityManagerService$UiHandler.handleMessage(ActivityManagerService.java:1791)
+  at android.os.Handler.dispatchMessage(Handler.java:106)
+  at android.os.Looper.loop(Looper.java:236)
+  at android.os.HandlerThread.run(HandlerThread.java:67)
+  at com.android.server.ServiceThread.run(ServiceThread.java:45)
+  at com.android.server.UiThread.run(UiThread.java:45)
+```
+
+看起来实际上是同一个进程的 native 部分的 sensorservice 注册了 IUidObserver ，在这里导致的卡死（原来 oneway 到当前进程的调用的也是在当前线程进行的）
+
+ANR 记录的 Waiting channels ：
+
+```
+sysTid=2288      futex_wait_queue_me
+```
+
+第二次崩溃则有所不同，不是 binder transact
+
+```
+01-15 14:34:57.991 10612 10696 I watchdog: Blocked in monitor com.android.server.power.PowerManagerService on foreground thread (android.fg), Blocked in handler on main thread (main)
+01-15 14:34:57.992 10612 10696 W Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in monitor com.android.server.power.PowerManagerService on foreground thread (android.fg), Blocked in handler on main thread (main)
+01-15 14:34:57.994 10612 10696 W Watchdog: android.fg annotated stack trace:
+01-15 14:34:57.995 10612 10696 W Watchdog:     at com.android.server.power.PowerManagerService.monitor(PowerManagerService.java:3902)
+01-15 14:34:57.996 10612 10696 W Watchdog:     - waiting to lock <0x0d875e7f> (a java.lang.Object)
+01-15 14:34:57.997 10612 10696 W Watchdog:     at com.android.server.Watchdog$HandlerChecker.run(Watchdog.java:398)
+01-15 14:34:57.997 10612 10696 W Watchdog:     at android.os.Handler.handleCallback(Handler.java:938)
+01-15 14:34:57.997 10612 10696 W Watchdog:     at android.os.Handler.dispatchMessage(Handler.java:99)
+01-15 14:34:57.997 10612 10696 W Watchdog:     at android.os.Looper.loop(Looper.java:236)
+01-15 14:34:57.998 10612 10696 W Watchdog:     at android.os.HandlerThread.run(HandlerThread.java:67)
+01-15 14:34:57.998 10612 10696 W Watchdog:     at com.android.server.ServiceThread.run(ServiceThread.java:45)
+01-15 14:34:57.998 10612 10695 I android_os_HwBinder: HwBinder: Starting thread pool for getting: android.hidl.manager@1.0::IServiceManager/default
+01-15 14:34:58.036 10612 10696 W Watchdog: main annotated stack trace:
+01-15 14:34:58.036 10612 10696 W Watchdog:     at android.hardware.SystemSensorManager$BaseEventQueue.nativeEnableSensor(Native Method)
+01-15 14:34:58.036 10612 10696 W Watchdog:     at android.hardware.SystemSensorManager$BaseEventQueue.enableSensor(SystemSensorManager.java:767)
+01-15 14:34:58.036 10612 10696 W Watchdog:     at android.hardware.SystemSensorManager$BaseEventQueue.addSensor(SystemSensorManager.java:692)
+01-15 14:34:58.036 10612 10696 W Watchdog:     at android.hardware.SystemSensorManager.registerListenerImpl(SystemSensorManager.java:198)
+01-15 14:34:58.037 10612 10696 W Watchdog:     - locked <0x089c3d42> (a java.util.HashMap)
+01-15 14:34:58.037 10612 10696 W Watchdog:     at android.hardware.SensorManager.registerListener(SensorManager.java:823)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.SunlightController.setLightSensorEnabled(SunlightController.java:228)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.SunlightController.setLightSensorEnabledForNotification(SunlightController.java:182)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.SunlightController.shouldPrepareToNotify(SunlightController.java:176)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.SunlightController.updateSunlightModeSettings(SunlightController.java:168)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.SunlightController.<init>(SunlightController.java:111)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.DisplayPowerControllerInjector.<init>(DisplayPowerControllerInjector.java:52)
+01-15 14:34:58.038 10612 10696 W Watchdog:     at com.android.server.display.DisplayPowerController.<init>(DisplayPowerController.java:578)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.server.display.DisplayManagerService$LocalService.initPowerManagement(DisplayManagerService.java:2624)
+01-15 14:34:58.039 10612 10696 W Watchdog:     - locked <0x083c6153> (a com.android.server.display.DisplayManagerService$SyncRoot)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.server.power.PowerManagerService.systemReady(PowerManagerService.java:1097)
+01-15 14:34:58.039 10612 10696 W Watchdog:     - locked <0x0d875e7f> (a java.lang.Object)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.server.SystemServer.startOtherServices(SystemServer.java:2299)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.server.SystemServer.run(SystemServer.java:612)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.server.SystemServer.main(SystemServer.java:422)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at java.lang.reflect.Method.invoke(Native Method)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:656)
+01-15 14:34:58.039 10612 10696 W Watchdog:     at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:945)
+01-15 14:34:58.039 10612 10696 W Watchdog: *** GOODBYE!
+```
+
+但是 waiting channels 是同样的：
+
+```
+"android.fg" prio=5 tid=19 Blocked
+  | group="main" sCount=1 dsCount=0 flags=1 obj=0x15240bd0 self=0xb40000791b55d800
+  | sysTid=10689 nice=0 cgrp=default sched=0/0 handle=0x78c4664cc0
+  | state=S schedstat=( 9294067 10038702 171 ) utm=0 stm=0 core=0 HZ=100
+  | stack=0x78c4561000-0x78c4563000 stackSize=1043KB
+  | held mutexes=
+  at com.android.server.power.PowerManagerService.monitor(PowerManagerService.java:3902)
+  - waiting to lock <0x0d875e7f> (a java.lang.Object) held by thread 1
+  at com.android.server.Watchdog$HandlerChecker.run(Watchdog.java:398)
+  at android.os.Handler.handleCallback(Handler.java:938)
+  at android.os.Handler.dispatchMessage(Handler.java:99)
+  at android.os.Looper.loop(Looper.java:236)
+  at android.os.HandlerThread.run(HandlerThread.java:67)
+  at com.android.server.ServiceThread.run(ServiceThread.java:45)
+
+sysTid=10689     futex_wait_queue_me
+```
