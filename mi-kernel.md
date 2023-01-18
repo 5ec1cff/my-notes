@@ -363,6 +363,8 @@ unix diag 是起作用了（主要就是用来获取 unix socket 的 peer 信息
 'l'     - Shows a stack backtrace for all active CPUs.
 ```
 
+向 `/proc/sysrq-trigger` 写入 `w` 会在 dmesg 中打印处于 Uninterruptable state （D 状态）的进程信息。
+
 ```
 01-15 14:33:23.772  1806  2293 E Watchdog: First set of traces taken from /data/anr/anr_2023-01-15-14-32-43-200
 01-15 14:33:23.825  1806  2293 E Watchdog: Second set of traces taken from /data/anr/anr_2023-01-15-14-33-13-555
@@ -371,7 +373,7 @@ unix diag 是起作用了（主要就是用来获取 unix socket 的 peer 信息
 01-15 14:33:24.207  1806  2294 D ActivityManager: report kill process: killerPid is:1806, killedPid is:1806
 ```
 
-dmesg 中，相近的时间出现了这样的日志（感觉 3s 差得有点远）
+dmesg 中，相近的时间出现了这样的日志（感觉 3s 差得有点远），也就是 D 状态进程。
 
 ```
 [Sun Jan 15 14:33:26 2023] sysrq: Show Blocked State
@@ -484,6 +486,8 @@ ANR 记录：
   at com.android.server.UiThread.run(UiThread.java:45)
 ```
 
+> 线程信息输出的格式可参考 [`art/runtime/thread.cc:Thread::DumpState`](https://android.googlesource.com/platform/art/+/788d46a488364c37d38a96d7f2661d8e37561ea6/runtime/thread.cc#1956)
+
 看起来实际上是同一个进程的 native 部分的 sensorservice 注册了 IUidObserver ，在这里导致的卡死（原来 oneway 到当前进程的调用的也是在当前线程进行的）
 
 ANR 记录的 Waiting channels ：
@@ -554,3 +558,57 @@ sysTid=2288      futex_wait_queue_me
 
 sysTid=10689     futex_wait_queue_me
 ```
+
+一开始怀疑是 futex 有问题，但是这个说法似乎站不住脚。因为我看了一下上一次启动的 log ，导致卡死的两个位置和现在这次几乎一致（不过上一次卡死了三次）。此外，除了开机那段时间有问题，之后就一直平稳运行。除非是开机的时候超过了某种资源限制，导致 futex 工作不正常。由于我对内核不了解，很难看出有什么问题。
+
+于是怀疑的目光又回到 sensor 上，注意到这些调用似乎都与 sensor 有关，有可能确实是某个传感器出了问题。
+
+在使用的时候观察到，距离传感器似乎一直处于失效状态。换回原厂内核则是正常的
+
+观察到 anr 中并没有 905 (`android.hardware.sensors@1.0-service`) 的调用堆栈记录，其他进程都是有的，不知道是什么原因，也许是权限不足。这样我们难以确定问题 ，因此需要在 Watchdog 自杀的时候停下系统，以便我们检查 sensor 的问题。
+
+在 Watchdog 的 run 的主循环中有这两段代码：
+
+```java
+// frameworks/base/services/core/java/com/android/server/Watchdog.java:run
+    if (controller != null) {
+        Slog.i(TAG, "Reporting stuck state to activity controller");
+        try {
+            Binder.setDumpDisabled("Service dumps disabled due to hung system process.");
+            // 1 = keep waiting, -1 = kill system
+            int res = controller.systemNotResponding(subject);
+            if (res >= 0) {
+                Slog.i(TAG, "Activity controller requested to coninue to wait");
+                waitedHalf = false;
+                continue;
+            }
+        } catch (RemoteException e) {
+        }
+    }
+
+    // Only kill the process if the debugger is not attached.
+    if (Debug.isDebuggerConnected()) {
+        debuggerWasConnected = 2;
+    }
+    if (debuggerWasConnected >= 2) {
+        Slog.w(TAG, "Debugger connected: Watchdog is *not* killing the system process");
+    } else if (debuggerWasConnected > 0) {
+        Slog.w(TAG, "Debugger was connected: Watchdog is *not* killing the system process");
+    } else if (!allowRestart) {
+        Slog.w(TAG, "Restart not allowed: Watchdog is *not* killing the system process");
+    } else {
+        Slog.w(TAG, "*** WATCHDOG KILLING SYSTEM PROCESS: " + subject);
+        WatchdogDiagnostics.diagnoseCheckers(blockedCheckers);
+        Slog.w(TAG, "*** GOODBYE!");
+        Process.killProcess(Process.myPid());
+        System.exit(10);
+    }
+```
+
+有两种方案：
+
+1. `am hang` 挂起系统，并且可以阻止 Watchdog 自杀。  
+2. 注册一个 IActivityController , systemNotResponding 返回 1 ，阻止 Watchdog 杀死系统。  
+
+
+TO BE CONTINUED
