@@ -488,7 +488,7 @@ ANR 记录：
 
 > 线程信息输出的格式可参考 [`art/runtime/thread.cc:Thread::DumpState`](https://android.googlesource.com/platform/art/+/788d46a488364c37d38a96d7f2661d8e37561ea6/runtime/thread.cc#1956)
 
-看起来实际上是同一个进程的 native 部分的 sensorservice 注册了 IUidObserver ，在这里导致的卡死（原来 oneway 到当前进程的调用的也是在当前线程进行的）
+看起来实际上是同一个进程的 native 部分 sensorservice 注册了 IUidObserver ，binder 调用走到这里，导致的卡死（原来 oneway 到当前进程的调用的也是在当前线程进行的）
 
 ANR 记录的 Waiting channels ：
 
@@ -610,5 +610,108 @@ sysTid=10689     futex_wait_queue_me
 1. `am hang` 挂起系统，并且可以阻止 Watchdog 自杀。  
 2. 注册一个 IActivityController , systemNotResponding 返回 1 ，阻止 Watchdog 杀死系统。  
 
+我们采取第一种方案，选择恰当的时机调用 am hang ，然后 debuggerd 打印 sensor 进程的堆栈信息。
 
-TO BE CONTINUED
+在打印之前，我们手动看一下当前系统中处于 D 状态的进程：
+
+```
+echo 'w' > /proc/sysrq-trigger && dmesg
+```
+
+确实是 sensor 进程，然后 `debuggerd pid` 。
+
+等待一段时间后，得到了错误，debuggerd 竟然无法打印任何信息。
+
+看上去处于 D 状态的进程不仅无法 kill ，甚至无法用 ptrace 检查。
+
+不过当 sensor 进程的 D 状态结束后，又可以正常 dump ，此时重启系统也不会再软重启。
+
+既然用户空间无法解决调试的问题，那么还必须借助内核，毕竟内核是我们可以掌握的，并且带有 kprobe 的内核是可以开机的。
+
+```
+/vendor/etc/init/android.hardware.sensors@1.0-service.rc
+service vendor.sensors-hal-1-0 /vendor/bin/hw/android.hardware.sensors@1.0-service
+    interface android.hardware.sensors@1.0::ISensors default
+    class hal
+    user system
+    group system wakelock uhid input context_hub
+    capabilities BLOCK_SUSPEND
+    rlimit rtprio 10 10
+```
+
+[Kprobe-based Event Tracing — The Linux Kernel documentation](https://docs.kernel.org/trace/kprobetrace.html)
+
+[Event Tracing — The Linux Kernel documentation](https://docs.kernel.org/trace/events.html)
+
+经过尝试，发现还是 strace 好用。既然进程处于 D 状态的时候没法 attach ，那我们就在出问题之前 attach 不就行了？
+
+首先 `stop` 停止系统服务，然后 kill 掉 sensor 进程，选择合适的时机立即 strace 上去。由于问题发生在主线程，我们也只需要 strace 主线程。
+
+```
+strace -p `pidof android.hardware.sensors@1.0-service`
+```
+
+可以观察到系统没启动的时候，sensor 正常，不会进入 D 状态。
+
+`start` 启动系统，直到进入桌面后， sensor 进程才出现 D 状态，观察 write 的 fd ，是下面这一个路径：
+
+```
+writev(5, [{iov_base="\0\230{\220H\312c\206nq\3", iov_len=11}, {iov_base="\4", iov_len=1}, {iov_base="TouchSensor\0", iov_len=12}, {iov_base="TouchSensor sensors_activate han"..., iov_len=67}], 4) = -1 EAGAIN (Try again)
+write(18, "0\0", 2
+# D 状态结束后返回的值，看起来很正常
+write(18, "0\0", 2)                     = 2
+
+1|picasso:/ # ls -l /proc/31640/fd/18
+lrwx------ 1 system system 64 2023-01-20 15:54 /proc/31640/fd/18 -> /sys/devices/virtual/touch/touch_dev/palm_sensor
+```
+
+我们来定位源代码。根据 sysrq 打印的 call trace:
+
+```
+[Sun Jan 15 14:33:26 2023] __switch_to+0x13c/0x158
+[Sun Jan 15 14:33:26 2023] __schedule+0xb44/0xd98
+[Sun Jan 15 14:33:26 2023] schedule_preempt_disabled+0x7c/0xa8
+[Sun Jan 15 14:33:26 2023] __mutex_lock+0x444/0x660
+[Sun Jan 15 14:33:26 2023] __mutex_lock_slowpath+0x10/0x18
+[Sun Jan 15 14:33:26 2023] mutex_lock+0x30/0x38
+[Sun Jan 15 14:33:26 2023] kernfs_fop_write+0x100/0x1d0
+[Sun Jan 15 14:33:26 2023] __vfs_write+0x44/0x148
+[Sun Jan 15 14:33:26 2023] vfs_write+0xe0/0x1a0
+[Sun Jan 15 14:33:26 2023] ksys_write+0x6c/0xd0
+[Sun Jan 15 14:33:26 2023] __arm64_sys_write+0x18/0x20
+[Sun Jan 15 14:33:26 2023] el0_svc_common+0x98/0x148
+[Sun Jan 15 14:33:26 2023] el0_svc_handler+0x68/0x80
+[Sun Jan 15 14:33:26 2023] el0_svc+0x8/0xc
+```
+
+看一看 `kernfs_fop_write+0x100/0x1d0` 的具体位置
+
+> 这个地址是 `符号名 + 偏移/函数总长度` 的形式
+
+利用 addr2line 找到源码位置：
+
+```
+$ readelf -s out/vmlinux -W | grep kernfs_fop_write
+ 21381: ffffff8008367710   460 FUNC    LOCAL  DEFAULT    2 kernfs_fop_write
+# 实际代码位置是 0xffffff8008367710 + 0x100 = 0xffffff8008367810
+$ toolchains/Snapdragon-LLVM-10.0.9/bin/llvm-addr2line -e=out/vmlinux -a --verbose 0xffffff8008367810
+0xffffff8008367810 
+  Filename: /home/five_ec1cff/mi/Xiaomi_Kernel_OpenSource-picasso-r-oss/out/../fs/kernfs/file.c
+Function start line: 273
+  Line: 308
+  Column: 29
+```
+
+```cpp
+ 273 static ssize_t kernfs_fop_write(struct file *file, const char __user *user_buf,
+ 274                 size_t count, loff_t *ppos)
+ 275 {
+ 276     struct kernfs_open_file *of = kernfs_of(file);
+
+ 303     /*
+ 304      * @of->mutex nests outside active ref and is used both to ensure that
+ 305      * the ops aren't called concurrently for the same open file.
+ 306      */
+ 307     mutex_lock(&of->mutex);
+ 308     if (!kernfs_get_active(of->kn)) {
+```
