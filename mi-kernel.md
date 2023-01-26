@@ -715,3 +715,76 @@ Function start line: 273
  307     mutex_lock(&of->mutex);
  308     if (!kernfs_get_active(of->kn)) {
 ```
+
+尝试添加 `CONFIG_DEBUG_MUTEX` 和 `CONFIG_DETECT_HUNG_TASKS` ，但后者不知道什么原因没有输出到最终的 `.config` ，前者也没有什么有用的信息输出，还导致 Wifi 无法使用（也许是改变了 lock 的结构）
+
+[Linux kernel: How to debug mutex deadlock 如何调试mutex死锁 - super119 - 博客园](https://www.cnblogs.com/super119/archive/2013/04/09/3010448.html)
+
+既然这样，就自己修改 `kernel/locking/mutex.c` ，在 `__mutex_lock_slowpath` 加一段调试代码，打印当前 task 和 mutex owner task 的信息。
+
+```c
+1342 static noinline void __sched
+1343 __mutex_lock_slowpath(struct mutex *lock)
+1344 {
+1345     // debug
+1346     pr_info("mutex lock slowpath:");
+1347     dump_stack();
+1348     pr_info("owner stack:");
+1349     sched_show_task(__mutex_owner(lock));
+1350     // debug
+1351     __mutex_lock(lock, TASK_UNINTERRUPTIBLE, 0, NULL, _RET_IP_);
+1352 }
+```
+
+但是这样无法启动，应该是 kernel panic 了，重启看看 pstore ：
+
+```
+[    0.170177] owner stack:
+[    0.170185] Unable to handle kernel NULL pointer dereference at virtual address 0000000000000ab8
+[    0.170191] Mem abort info:
+[    0.170195]   ESR = 0x96000005
+[    0.170199]   Exception class = DABT (current EL), IL = 32 bits
+[    0.170204]   SET = 0, FnV = 0
+[     .7207M   EA = 0, S1PTW = 0
+[    0.160211] Data abgrt info:
+[ 
+```
+
+看起来这个 owner 不一定总是能转换成 task 的，此外，尝试 dump owner stack 还有这样的输出：
+
+```
+[    0.169433] owner stAck:
+[    0.169436] kworker/u16:1   R  running task        0    80      2 0x00000008
+[    0.169456] Workqueue: events_unbound async_run_entry_fn
+[    0.169461] Call trace:
+[    0.169466] The task:kworker/u16:1 is running on other cpu currently!
+```
+
+并没有 dump 出来，因此这个方法似乎也不怎么有效
+
+那就换一个思路，上面的方法是在 mutex 处检查，实际上进入 slowpath 的概率还是很大的，有可能导致 dmesg flood ，因此我们还是看 `kernfs_fop_write`
+
+
+
+
+[&#x5b;Kernel SU&#x5d; 一种很新的 ROOT 方式 -> Redmi K30 5G 编译教程_哔哩哔哩_bilibili](https://www.bilibili.com/video/av478167357/)
+
+
+```
+(gdb) file out/vmlinux
+(gdb) ptype /o struct file
+/* offset    |  size */  type = struct file {
+/*   16      |    16 */    struct path {
+/*   16      |     8 */        struct vfsmount *mnt;
+/*   24      |     8 */        struct dentry *dentry;
+
+                               /* total size (bytes):   16 */
+                           } f_path;
+
+(gdb) ptype /o struct dentry
+/* offset    |  size */  type = struct dentry {
+/*   40      |     8 */        const unsigned char *name;
+```
+
+
+[Linux 内核：设备驱动模型（1）sysfs与kobject基类 - schips - 博客园](https://www.cnblogs.com/schips/p/linux_device_model_1.html)
