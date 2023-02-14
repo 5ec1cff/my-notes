@@ -786,5 +786,261 @@ Function start line: 273
 /*   40      |     8 */        const unsigned char *name;
 ```
 
+`echo 'p:myprobe kernfs_fop_write name=+0(+40(+24(%x0))):string' > /sys/kernel/debug/tracing/kprobe_events`
 
 [Linux 内核：设备驱动模型（1）sysfs与kobject基类 - schips - 博客园](https://www.cnblogs.com/schips/p/linux_device_model_1.html)
+
+
+这回在 kernfs 的各个用到 `kernfs_open_file->mutex` 的代码加上了调试代码（包括 mutex_lock 和 mutex_unlock）：
+
+```c
+#define MY_DEBUG(N) do { \
+if (of->file != NULL && strcmp(of->file->f_path.dentry->d_name.name, "palm_sensor") == 0) { \
+pr_info(N" on mutex=%p", of->mutex);                                               \
+dump_stack(); \
+}                         \
+} while (0)
+
+	MY_DEBUG("kernfs_seq_start mutex_lock pre");
+	mutex_lock(&of->mutex);
+	MY_DEBUG("kernfs_seq_start mutex_lock post");
+```
+
+观察到这一次 write 的 mutex lock 进入后很长一段时间没有退出，也没有 mutex unlock
+
+```
+[Fri Feb 10 10:38:05 2023] kernfs_fop_write mutex_lock pre on mutex=0000000011f85b9c
+[Fri Feb 10 10:38:05 2023] CPU: 7 PID: 908 Comm: sensors@1.0-ser Tainted: G S      W  O      4.19.113-perf-g481f117a1553 #12
+[Fri Feb 10 10:38:05 2023] Hardware name: Qualcomm Technologies, Inc. 7250 picasso (DT)
+[Fri Feb 10 10:38:05 2023] Call trace:
+[Fri Feb 10 10:38:05 2023] dump_backtrace+0x0/0x278
+[Fri Feb 10 10:38:05 2023] show_stack+0x14/0x20
+[Fri Feb 10 10:38:05 2023] dump_stack+0xd4/0x10c
+[Fri Feb 10 10:38:05 2023] kernfs_fop_write+0x280/0x320
+[Fri Feb 10 10:38:05 2023] __vfs_write+0x44/0x148
+[Fri Feb 10 10:38:05 2023] vfs_write+0xe0/0x1a0
+[Fri Feb 10 10:38:05 2023] ksys_write+0x6c/0xd0
+[Fri Feb 10 10:38:05 2023] __arm64_sys_write+0x18/0x20
+[Fri Feb 10 10:38:05 2023] el0_svc_common+0x98/0x148
+[Fri Feb 10 10:38:05 2023] el0_svc_handler+0x68/0x80
+[Fri Feb 10 10:38:05 2023] el0_svc+0x8/0xc
+```
+
+而在它之前有一个 seq_start 获得了锁而没有释放，看起来是来自 sensor 的另一个线程的读操作：
+
+```
+[Fri Feb 10 10:38:00 2023] kernfs_seq_start mutex_lock pre on mutex=00000000899fe7c4
+[Fri Feb 10 10:38:00 2023] CPU: 1 PID: 1031 Comm: sensors@1.0-ser Tainted: G S      W  O      4.19.113-perf-g481f117a1553 #12
+[Fri Feb 10 10:38:00 2023] Hardware name: Qualcomm Technologies, Inc. 7250 picasso (DT)
+[Fri Feb 10 10:38:00 2023] Call trace:
+[Fri Feb 10 10:38:00 2023] dump_backtrace+0x0/0x278
+[Fri Feb 10 10:38:00 2023] show_stack+0x14/0x20
+[Fri Feb 10 10:38:00 2023] dump_stack+0xd4/0x10c
+[Fri Feb 10 10:38:00 2023] kernfs_seq_start+0x130/0x160
+[Fri Feb 10 10:38:00 2023] seq_read+0x16c/0x490
+[Fri Feb 10 10:38:00 2023] kernfs_fop_read+0x6c/0x310
+[Fri Feb 10 10:38:00 2023] __vfs_read+0x44/0x140
+[Fri Feb 10 10:38:00 2023] vfs_read+0xb8/0x150
+[Fri Feb 10 10:38:00 2023] __arm64_sys_pread64+0x80/0xc0
+[Fri Feb 10 10:38:00 2023] el0_svc_common+0x98/0x148
+[Fri Feb 10 10:38:00 2023] el0_svc_handler+0x68/0x80
+[Fri Feb 10 10:38:00 2023] el0_svc+0x8/0xc
+[Fri Feb 10 10:38:00 2023] kernfs_seq_start mutex_lock post on mutex=00000000899fe7c4
+[Fri Feb 10 10:38:00 2023] CPU: 1 PID: 1031 Comm: sensors@1.0-ser Tainted: G S      W  O      4.19.113-perf-g481f117a1553 #12
+[Fri Feb 10 10:38:00 2023] Hardware name: Qualcomm Technologies, Inc. 7250 picasso (DT)
+[Fri Feb 10 10:38:00 2023] Call trace:
+[Fri Feb 10 10:38:00 2023] dump_backtrace+0x0/0x278
+[Fri Feb 10 10:38:00 2023] show_stack+0x14/0x20
+[Fri Feb 10 10:38:00 2023] dump_stack+0xd4/0x10c
+[Fri Feb 10 10:38:00 2023] kernfs_seq_start+0x158/0x160
+[Fri Feb 10 10:38:00 2023] seq_read+0x16c/0x490
+[Fri Feb 10 10:38:00 2023] kernfs_fop_read+0x6c/0x310
+[Fri Feb 10 10:38:00 2023] __vfs_read+0x44/0x140
+[Fri Feb 10 10:38:00 2023] vfs_read+0xb8/0x150
+[Fri Feb 10 10:38:00 2023] __arm64_sys_pread64+0x80/0xc0
+[Fri Feb 10 10:38:00 2023] el0_svc_common+0x98/0x148
+[Fri Feb 10 10:38:00 2023] el0_svc_handler+0x68/0x80
+[Fri Feb 10 10:38:00 2023] el0_svc+0x8/0xc
+```
+
+三分钟后 seq_stop 释放了锁，write 终于能够获得锁
+
+```
+[Fri Feb 10 10:41:01 2023] kernfs_seq_stop mutex_unlock on mutex=00000000d43305d5
+[Fri Feb 10 10:41:01 2023] CPU: 1 PID: 1031 Comm: sensors@1.0-ser Tainted: G S      W  O      4.19.113-perf-g481f117a1553 #12
+[Fri Feb 10 10:41:01 2023] Hardware name: Qualcomm Technologies, Inc. 7250 picasso (DT)
+[Fri Feb 10 10:41:01 2023] Call trace:
+[Fri Feb 10 10:41:01 2023] dump_backtrace+0x0/0x278
+[Fri Feb 10 10:41:01 2023] show_stack+0x14/0x20
+[Fri Feb 10 10:41:01 2023] dump_stack+0xd4/0x10c
+[Fri Feb 10 10:41:01 2023] kernfs_seq_stop+0xbc/0xc8
+[Fri Feb 10 10:41:01 2023] seq_read+0x38c/0x490
+[Fri Feb 10 10:41:01 2023] kernfs_fop_read+0x6c/0x310
+[Fri Feb 10 10:41:01 2023] __vfs_read+0x44/0x140
+[Fri Feb 10 10:41:01 2023] vfs_read+0xb8/0x150
+[Fri Feb 10 10:41:01 2023] __arm64_sys_pread64+0x80/0xc0
+[Fri Feb 10 10:41:01 2023] el0_svc_common+0x98/0x148
+[Fri Feb 10 10:41:01 2023] init: Untracked pid 11397 received signal 14
+[Fri Feb 10 10:41:01 2023] el0_svc_handler+0x68/0x80
+[Fri Feb 10 10:41:01 2023] el0_svc+0x8/0xc
+[Fri Feb 10 10:41:01 2023] kernfs_fop_write mutex_lock post on mutex=0000000011f85b9c
+[Fri Feb 10 10:41:01 2023] CPU: 7 PID: 908 Comm: sensors@1.0-ser Tainted: G S      W  O      4.19.113-perf-g481f117a1553 #12
+[Fri Feb 10 10:41:01 2023] Hardware name: Qualcomm Technologies, Inc. 7250 picasso (DT)
+[Fri Feb 10 10:41:01 2023] Call trace:
+[Fri Feb 10 10:41:01 2023] dump_backtrace+0x0/0x278
+[Fri Feb 10 10:41:01 2023] show_stack+0x14/0x20
+[Fri Feb 10 10:41:01 2023] dump_stack+0xd4/0x10c
+[Fri Feb 10 10:41:01 2023] kernfs_fop_write+0x2a8/0x320
+[Fri Feb 10 10:41:01 2023] __vfs_write+0x44/0x148
+[Fri Feb 10 10:41:01 2023] vfs_write+0xe0/0x1a0
+[Fri Feb 10 10:41:01 2023] ksys_write+0x6c/0xd0
+[Fri Feb 10 10:41:01 2023] __arm64_sys_write+0x18/0x20
+[Fri Feb 10 10:41:01 2023] el0_svc_common+0x98/0x148
+[Fri Feb 10 10:41:01 2023] el0_svc_handler+0x68/0x80
+[Fri Feb 10 10:41:01 2023] el0_svc+0x8/0xc
+```
+
+有些怀疑是这个地方：
+
+```c
+// drivers/input/touchscreen/xiaomi/xiaomi_touch.c
+static ssize_t palm_sensor_show(struct device *dev,
+struct device_attribute *attr, char *buf)
+{
+	struct xiaomi_touch_pdata *pdata = dev_get_drvdata(dev);
+	struct xiaomi_touch *touch_dev = pdata->device;
+
+	wait_event_interruptible(touch_dev->wait_queue, pdata->palm_changed);
+	pdata->palm_changed = false;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", pdata->palm_value);
+}
+```
+
+于是 strace
+
+```
+[pid 14288] ppoll([{fd=18</sys/devices/virtual/touch/touch_dev/palm_sensor>, events=POLLPRI|POLLERR}], 1, NULL, NULL, 0 <unfinished ...>
+[pid 14288] <... ppoll resumed>)        = 1 ([{fd=18, revents=POLLPRI|POLLERR}])
+ > /apex/com.android.runtime/lib64/bionic/libc.so(__ppoll+0x8) [0xd7b58]
+ > /apex/com.android.runtime/lib64/bionic/libc.so(poll+0x5f) [0x95ba7]
+ > /vendor/lib64/sensors.touch.so(_ZL12sensors_pollP21sensors_poll_device_tP15sensors_event_ti+0x157) [0x25c7]
+ > /vendor/lib64/hw/android.hardware.sensors@1.0-impl.so(_Z10writerTaskPv+0x87) [0x9baf]
+ > /apex/com.android.runtime/lib64/bionic/libc.so(_ZL15__pthread_startPv+0x43) [0xeb86b]
+ > /apex/com.android.runtime/lib64/bionic/libc.so(__start_thread+0x43) [0x8ba8b]
+[pid 14288] pread64(18</sys/devices/virtual/touch/touch_dev/palm_sensor>,  <unfinished ...>
+```
+
+卡住的同时，观察线程 14288 的内核栈（此时这个线程只是 sleep）：
+
+```
+picasso:/ # cat /proc/14288/stack
+[<0>] __switch_to+0x13c/0x158
+[<0>] palm_sensor_show+0x64/0xc0
+[<0>] dev_attr_show+0x20/0x58
+[<0>] sysfs_kf_seq_show+0x8c/0xf8
+[<0>] kernfs_seq_show+0x28/0x30
+[<0>] seq_read+0x1a4/0x490
+[<0>] kernfs_fop_read+0x6c/0x310
+[<0>] __vfs_read+0x44/0x140
+[<0>] vfs_read+0xb8/0x150
+[<0>] __arm64_sys_pread64+0x80/0xc0
+[<0>] el0_svc_common+0x98/0x148
+[<0>] el0_svc_handler+0x68/0x80
+[<0>] el0_svc+0x8/0xc
+[<0>] 0xffffffffffffffff
+```
+
+```
+  Filename: out/../drivers/input/touchscreen/xiaomi/xiaomi_touch.c
+Function start line: 202
+  Line: 208
+  Column: 2
+```
+
+确实是 `wait_event_interruptible` 这个调用
+
+```c
+static ssize_t palm_sensor_show(struct device *dev,
+struct device_attribute *attr, char *buf)
+{
+	struct xiaomi_touch_pdata *pdata = dev_get_drvdata(dev);
+	struct xiaomi_touch *touch_dev = pdata->device;
+
+	wait_event_interruptible(touch_dev->wait_queue, pdata->palm_changed); // 208
+	pdata->palm_changed = false;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", pdata->palm_value);
+}
+```
+
+发现 ptrace 似乎会导致间接的卡死，正常来说这个 D 状态等几分钟就能解除，但 strace 后一直卡着不动，导致 write 和 pread64 的堆栈看不到，退出 strace 之后才能解除 D 状态的卡死（但是堆栈还是看不到）
+
+
+……
+
+尝试合了下 EndCredits 的 picasso 内核的这两个 commit ：
+
+[touchscreen: nt36672c: Fix unable to set xiaomi touch interface mode · EndCredits/kernel_xiaomi_sm7250@3f552d0](https://github.com/EndCredits/kernel_xiaomi_sm7250/commit/3f552d0a87834c206a5a1b2f90580802e049a911)  
+[touchscreen: nt36672c: Return 0 if allocation fails in test_buff_init · EndCredits/kernel_xiaomi_sm7250@84adaa0](https://github.com/EndCredits/kernel_xiaomi_sm7250/commit/84adaa031e05ae61689642f8e587895055bb8888)  
+
+第一次启动虽然观察到 block ，但不知为何很快就结束了，且没有重启。
+
+喜出望外，以为解决了问题。然而再次重启，这次主动关闭屏幕后又打不开了，显然还是会 block 住，最后仍然需要经过三分钟的重启才正常。
+
+……
+
+在 `update_palm_sensor_value -> nvt_check_palm -> nvt_ts_work_func` 一路上都插了 log ，最后一条都没打出来
+
+经过不少跟踪，我也大概看懂了整个卡死的流程。我现在没法理解一些问题：
+
+1. sysfs 的 poll 到底怎么工作的，为什么对 palm_sensor 的第一次 poll 会很快返回，之后的 poll 就根本没返回，在源代码中也没看到 sysfs_notify 的调用  
+2. 卡死最终是如何自动恢复的，没有任何日志指明问题  
+3. 官方内核的日志和自己编译的出来的 nvt-ts-spi 日志内容几乎一模一样，都没有任何痕迹表明 `update_palm_sensor_value` 被调用  
+4. read `palm_sensor` 在官方内核中很快返回了 0 ，自己编译的会一直卡在那；源码的 show 里面都有一个 wait_event_interrupted ，不知道为什么官方内核就能很快返回（假定那个中断只调用一次）  
+5. 距离传感器到底怎么工作的，sensor 进程一直在 poll 这个 palm_sensor ，但是实际上触发的时候 poll 也没有返回  
+
+难道这个 sysfs 里面的 palm_sensor 文件实际上其实根本没有功能？也许只有反编译官方的内核才能知道。
+
+使用 ghidra 打开内核，由于没有符号信息，因此难以分析。
+
+[反编译 Android 内核, 从 Boot.img 到 IDA Pro - AKR社区](https://www.akr-developers.com/d/343)
+
+[nforest/droidimg: Android/Linux vmlinux loader](https://github.com/nforest/droidimg)
+
+使用上面的脚本可以打印 kernel 的 kallsyms 相当于符号表。由于我们的内核有 KASLR ，因此需要先用它的修复程序：
+
+```
+git clone https://github.com/nforest/droidimg
+gcc fix_kaslr_arm64.c -o fka
+./fka kernel new_kernel
+python vmlinux.py new_kernel > kallsyms.txt
+```
+
+最终我们得到了 kallsyms ，简单处理后即可导入 ghidra 。我们来到 `palm_sensor_show` 看一看：
+
+![](res/images/20230214_01.png)
+
+看起来并没有任何和 wait_event 相关的东西，和源码不同，与 `p_sensor_show` 对比：
+
+![](res/images/20230214_02.png)
+
+于是我们也修改：
+
+```c
+static ssize_t palm_sensor_show(struct device *dev,
+struct device_attribute *attr, char *buf)
+{
+	struct xiaomi_touch_pdata *pdata = dev_get_drvdata(dev);
+	pdata->palm_changed = false;
+	return snprintf(buf, PAGE_SIZE, "%d\n", 0);
+}
+```
+
+结果不出我所料，修改之后果然启动就不会出现卡死的现象了，并且距离传感器工作也正常了。
+
+看来小米的开源根本没改这个地方，就这么一个简单的问题我竟然排查了一个月……
+
+其他开源内核似乎也没改这个地方，难道它们的 `vendor.touch.so` 不是来自官方的？
+
+总之既然解决了这个卡死的问题，就可以进一步探索了，早就期待用上 KernelSU 了。
