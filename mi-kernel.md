@@ -1044,3 +1044,81 @@ struct device_attribute *attr, char *buf)
 其他开源内核似乎也没改这个地方，难道它们的 `vendor.touch.so` 不是来自官方的？
 
 总之既然解决了这个卡死的问题，就可以进一步探索了，早就期待用上 KernelSU 了。
+
+## 集成 KernelSU
+
+[How to integrate KernelSU for non GKI kernel? | KernelSU](https://kernelsu.org/guide/how-to-integrate-for-non-gki.html)
+
+[KernelSU/setup.sh at main · tiann/KernelSU](https://github.com/tiann/KernelSU/blob/main/kernel/setup.sh)
+
+考虑到我们自己就是一个 git 仓库，因此把 kernelsu 作为 submodule 
+
+```
+cd drivers
+git submodule add https://github.com/tiann/KernelSU
+ln -sf KernelSU/kernel kernelsu
+echo "obj-y += kernelsu/" >> Makefile
+```
+
+编译后 boot ，等待开机，然而系统却自动重启了
+
+再次开机后看看 pstore ，全都是这样的内容：
+
+![](res/images/20230215_01.png)
+
+```
+Unexpected kernel single-step exception at EL1
+```
+
+整个 pstore 都被它刷屏了，因此根本看不到问题发生前的日志，没法确定发生了什么
+
+之前 kprobe event trace 的工作都是正常的，为什么 ksu 就出问题了？
+
+既然如此，干脆注释掉这个 log ，在 `arch/arm64/kernel/debug-monitors.c` 里面。
+
+再次重启，果然还是没法启动，抓取 pstore 
+
+![](res/images/20230215_02.png)
+
+……
+
+反复抓取了几次 ramoops ，每次的错误都很离谱，出现了一些似乎不该出现的调用链。此外 ramoops 的随机 bit 损坏也让人难以分析。
+
+只好尝试把 `ksu_enable_ksud` 注释掉，碰碰运气，没想到这回成功启动了。
+
+安装 KSU App ，也显示正常工作。
+
+![](res/images/20230217_01.png)
+
+不过提示模块功能无法运作，但是 `cat /proc/filesystems` 是有 overlay 的。
+
+![](res/images/20230217_02.png)
+
+KSU 和 Magisk 是可以共存的，从原理上不难理解。如果没有在 ksu 给权限，调用的 su 就是 magisk 的。
+
+编译了一下 ksu 的 su ，然后在 manager 给权限，但仍然无法工作。查看 dmesg ：
+
+shell 是这样的：
+
+```
+[ 1041.918518] type=1400 audit(1676646049.887:82356): avc: denied { execute } for comm="ksusu" name="sh" dev="dm-5" ino=1071 scontext=u:r:su:s0 tcontext=u:object_r:shell_exec:s0 tclass=file permissive=0
+```
+
+termux：
+
+```
+[ 1357.068468] type=1400 audit(1676646365.035:83577): avc: granted { execute } for comm="bash" name="ksusu" dev="sda34" ino=323776 scontext=u:r:untrusted_app_27:s0:c212,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c212,c256,c512,c768 tclass=file app=com.termux.api
+[ 1357.070484] type=1400 audit(1676646365.035:83578): avc: granted { execute } for comm="bash" name="ksusu" dev="sda34" ino=323776 scontext=u:r:untrusted_app_27:s0:c212,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c212,c256,c512,c768 tclass=file app=com.termux.api
+[ 1357.071445] type=1400 audit(1676646365.035:83579): avc: granted { execute_no_trans } for comm="bash" path="/data/data/com.termux/files/home/codes/ksusu/ksusu" dev="sda34" ino=323776 scontext=u:r:untrusted_app_27:s0:c212,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c212,c256,c512,c768 tclass=file app=com.termux.api
+[ 1357.074739] type=1400 audit(1676646365.039:83580): avc: granted { execute } for comm="ksusu" path="/data/data/com.termux/files/home/codes/ksusu/ksusu" dev="sda34" ino=323776 scontext=u:r:untrusted_app_27:s0:c212,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c212,c256,c512,c768 tclass=file app=com.termux.api
+[ 1357.081986] type=1400 audit(1676646365.051:83581): avc: granted { execute } for comm="ksusu" path="/data/data/com.termux/files/usr/lib/libtermux-exec.so" dev="sda34" ino=1651501 scontext=u:r:untrusted_app_27:s0:c212,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c212,c256,c512,c768 tclass=file app=com.termux.api
+[ 1357.086884] KernelSU: ksu_handle_execveat_sucompat (null)
+[ 1357.087200] type=1400 audit(1676646365.055:83582): avc: denied { dac_read_search } for comm="ksusu" capability=2 scontext=u:r:su:s0 tcontext=u:r:su:s0 tclass=capability permissive=0 app=com.termux.api
+[ 1357.087528] type=1400 audit(1676646365.055:83583): avc: denied { dac_override } for comm="ksusu" capability=1 scontext=u:r:su:s0 tcontext=u:r:su:s0 tclass=capability permissive=0 app=com.termux.api
+[ 1357.087797] type=1400 audit(1676646365.055:83584): avc: denied { dac_read_search } for comm="ksusu" capability=2 scontext=u:r:su:s0 tcontext=u:r:su:s0 tclass=capability permissive=0 app=com.termux.api
+[ 1357.088873] type=1400 audit(1676646365.055:83585): avc: denied { dac_override } for comm="ksusu" capability=1 scontext=u:r:su:s0 tcontext=u:r:su:s0 tclass=capability permissive=0 app=com.termux.api
+```
+
+直接调用 sucompat 的 su 也不行。
+
+查了一下源码，发现 ksu 的 selinux 规则注入是在 ksud.c 里面的，现在被我们关掉了，自然就没用了。因此还是要解决 ksud 没法开机的问题。
