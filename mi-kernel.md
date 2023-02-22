@@ -1122,3 +1122,90 @@ termux：
 直接调用 sucompat 的 su 也不行。
 
 查了一下源码，发现 ksu 的 selinux 规则注入是在 ksud.c 里面的，现在被我们关掉了，自然就没用了。因此还是要解决 ksud 没法开机的问题。
+
+再次修改，这回只开启 ksud 而注释掉 sucompat 编译，无法开机，因此问题就出现在 ksud 的 hook 里面。
+
+ksud 是临时的 probe ，会在完成后自动移除，因此我们怀疑内核可能就是在 stop 或者 unprobe 出现了问题。
+
+只开 ksud 的 execveat hook 无法开机
+
+只开 ksud 的 vfs read hook 可以开机
+
+现在看来问题似乎是出在 execveat 上。
+
+发现 kernelsu 的 execveat hook 表现并不正确，并没有成功判断 init second_stage 的位置，且在 init 进入 second stage 一段时间后才认为进入了 second stage
+
+
+```
+	if (!memcmp(filename->name, system_bin_init,
+		    sizeof(system_bin_init) - 1)) {
+		// /system/bin/init executed
+		if (++init_count == 2) {
+			// 1: /system/bin/init selinux_setup
+			// 2: /system/bin/init second_stage
+			pr_info("/system/bin/init second_stage executed\n");
+			apply_kernelsu_rules();
+		}
+	}
+
+	if (first_app_process &&
+	    !memcmp(filename->name, app_process, sizeof(app_process) - 1)) {
+		first_app_process = false;
+		pr_info("exec app_process, /data prepared!\n");
+		on_post_fs_data(); // we keep this for old ksud
+		stop_execve_hook();
+	}
+```
+
+sucompat 和 ksud 各有一个 execveat probe ，但是前者没事。
+
+因此推测不可能是 memcmp 的问题，而 ksud 特有的还有 `apply_kernelsu_rules` 和 `on_post_fs_data`
+
+注释掉 `apply_kernelsu_rules` ，可以正常启动了
+
+又在 apply_kernelsu_rules 各处插桩，然后让 execveat 调用，如预想一样无法启动，但观察 pstore 却发现这个函数调用的时候没有发生任何异常。
+
+![](res/images/20230222_01.png)
+
+还是梳理一下，为什么 ksu 的 init stage 判断错误。
+
+首先我们的系统是 System as root ，而且有 initramfs ，因此 ramdisk 里面的 init 负责 chroot 到 system 。
+
+ramdisk 中的 init （称作 first stage init）：
+
+[`system/core/init/first_stage_init.cpp`](https://android.googlesource.com/platform/system/core/+/6072de17cd812daf238092695f26a552d3122f8c/init/first_stage_init.cpp#321)
+
+这里最后执行的是 `/system/bin/init selinux_setup` ，此时 system 分区已经挂载且被 chroot 作为根目录。
+
+[`system/core/init/selinux.cpp`](https://android.googlesource.com/platform/system/core/+/6072de17cd812daf238092695f26a552d3122f8c/init/selinux.cpp#698)
+
+selinux_setup 结束后执行的是 `/system/bin/init second_stage` ，才真正启动 init ，加载 rc 等等。
+
+而 Magisk 如何处理的呢？
+
+> 因为到目前为止用的是自己编译的 magisk ，所以拿自己仓库的链接，虽然我没改 init 部分。
+
+[native/src/init/twostage.cpp](https://github.com/5ec1cff/Magisk/blob/c5154045487ed66541fa391815290cce706008be/native/src/init/twostage.cpp#L23)
+
+magisk 备份并替换了 ramdisk 的 init 程序，内核执行 `/init` 之后执行的是 magiskinit ，而 FirstStageInit 中复制自身到 `/data/magiskinit` ，还原了原来的 init ，并 patch ，将 `/system/bin/init` 替换成 `/data/magiskinit` ，从而使得原先的 init 执行 `/system/bin/init selinux_setup` 的时候变成了 `/data/magiskinit` 。
+
+实际上系统每次传给 execve 的参数都是 `/system/bin/init` ，而 magisk 修改后有一次变成了 `/data/magiskinit` ，所以就有问题了。最后是 init 执行 subcontext 的时候，被 kernelsu 认为是 second stage 启动。
+
+那么这个 stage 不对是否会导致了内核错误？
+
+尝试把 init 次数从 2 改成 1 ，仍然无法启动。
+
+因此只能怀疑是 magisk 的问题了，于是用原厂的 boot patch ，这回总算能启动了！
+
+![](res/images/20230222_02.png)
+
+su 功能也是正常的，包括 prctl su 和 su compat 。
+
+![](res/images/20230222_03.png)
+
+经过以上这么一段折腾，得到的教训就是，ksu 和 magisk 是没法兼容的，起码原版代码肯定不行。
+
+但是究竟为什么导致 kernel panic 也还是不清楚，原因应该和 sepolicy 有关。
+
+总之现在 ksu 已经可用了，也许该考虑迁移 magisk 到 ksu 了？是时候也该体验以下我参与了小部分开发的 ZygiskOnKernelSU ，最好还能提交点新代码，不然对不住空大师给我挂上去的名字。
+
