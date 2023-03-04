@@ -2,7 +2,7 @@
 
 你以为 magisk 的构建只要简单的 `python build.py all` 吗？
 
-## 第零坑：ONDK
+## ONDK
 
 一上来就报错：NDK 找不到。我以为 Magisk 用的 Android NDK ，自己的 NDK 已经下了十甚至九个版本怎么会找不到，仔细一看，发现用的是自己造的轮子 `ONDK`
 
@@ -10,13 +10,9 @@
 
 考虑到用 `build.py ndk` 下载可能会很慢，因此自己找对版本下载了，然后解压到 `$ANDROID_SDK_ROOT/ndk/magisk` 即可。
 
-> 这玩意压缩包 500M ，解压出来 1.6G ……
-
-## 第一坑：jlink
+## jlink
 
 构建 stub 的时候报错 jlink 找不到，原来自己系统用的 LibericaJRE-16 竟然没这个玩意。
-
-> 这个 JRE 是升级 MC 1.17 ，要求 Java 16 所以下载了，然而不久就要求 Java 17 了
 
 干脆用 AS 的 JDK:
 
@@ -33,7 +29,7 @@ cmd /c%*
 set PATH=%_PATH%
 ```
 
-## 第二坑：cxx、 git symbolic link 与 Windows
+## cxx、 git symbolic link 与 Windows
 
 stub 构建顺利通过，接下来是 native ，然而很快又出了个问题：
 
@@ -85,7 +81,7 @@ cxxbridge-cmd installation failed!
 
 手动改了一下，再次 update ，总算过了这一关。
 
-## 第终极坑：Duplicated symbols
+## Duplicated symbols
 
 过了上面那一关，还有更难的：十万甚至九万个 duplicated symbols
 
@@ -143,7 +139,7 @@ def setup_ndk(args):
         shutil.copytree(src_dir, lib_dir, copy_function=cp, dirs_exist_ok=True)
 ```
 
-改好后，compile 的消息哆吧一下地喷涌而出在虚拟终端上：
+改好后：
 
 > 此处开了详细信息： `build.py -v all`
 
