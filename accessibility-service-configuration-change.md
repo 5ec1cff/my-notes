@@ -351,13 +351,18 @@ resolveOverrideConfiguration 默认直接把 mResolvedOverrideConfiguration 设�
 
 MT 管理器里面有个自动开启无障碍的功能，因此同样的问题也能复现。
 
+看了一下 blame ，这个 bug 在 2021 年 9 月被汇报，并在 2021 年 10 月提交了修复，看起来在 Android 12.1 才修复了这个问题。
+
+[_/android/platform/frameworks/base - Android Code Search](https://cs.android.com/android/_/android/platform/frameworks/base/+/425a952eb883516d7f2583c1e08e9ebc03bbaedf)
+
+[The voice interaction service may never receive new configuration if it was started by an activity &#x5b;201457378&#x5d; - Visible to Public - Issue Tracker](https://issuetracker.google.com/issues/201457378)
+
 ## 对策
 
 显然，不在应用中内建「无障碍自启」是最好的办法（x
 
 如果一定要有这个功能，且应用的其他功能需要 Configuration Changed ，应该确保启动无障碍服务的同一个进程没有任何 activity （可以使用多进程，无障碍服务独立一个进程来确保）。
 
-目前还没有测试该问题的版本范围。
 
 ## 总结
 
