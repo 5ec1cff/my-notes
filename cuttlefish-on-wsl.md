@@ -1,12 +1,56 @@
-# WSL 上使用 cuttlefish
+# 在 WSL 上使用 cuttlefish
 
 ## 虚拟化
 
-## 
+本以为 wsl 没有 kvm 的，但是发现自己的 wsl 已经有了，应该是支持的。
+
+## cuttlefish
 
 [Use Cuttlefish to Launch an AOSP Build  |  Android Open Source Project](https://source.android.com/docs/setup/create/cuttlefish-use?hl=en)
 
+### 下载镜像
+
+在 http://ci.android.com/ 下载，这里我搜的是 `aosp-android13-gsi` 。
+
+需要下载 `aosp_cf_x86_64_phone-img-xxxxxx.zip` 和 `cvd-host_package.tar.gz` 两个文件。
+
+然后按照官方的指示操作即可，到这里看起来都还没什么大问题。
+
+```
+sudo apt install -y git devscripts config-package-dev debhelper-compat golang curl
+git clone https://github.com/google/android-cuttlefish
+cd android-cuttlefish
+for dir in base frontend; do
+  cd $dir
+  debuild -i -us -uc -b -d
+  cd ..
+done
+sudo dpkg -i ./cuttlefish-base_*_*64.deb || sudo apt-get install -f
+sudo dpkg -i ./cuttlefish-user_*_*64.deb || sudo apt-get install -f
+sudo usermod -aG kvm,cvdnetwork,render $USER
+# WSL 没有 systemd ，没法 reboot ，所以我直接 wsl --shutdown 了
+sudo reboot
+
+mkdir cf
+cd cf
+tar -xvf /path/to/cvd-host_package.tar.gz
+unzip /path/to/aosp_cf_x86_64_phone-img-xxxxxx.zip
+```
+
+安装完成后，可以在 cf 目录使用以下命令启动和停止 cvd：
+
+```
+# 启动
+HOME=$PWD ./bin/launch_cvd --daemon
+# 停止
+HOME=$PWD ./bin/stop_cvd
+```
+
+接下来就是艰难的踩坑环节了……
+
 ### syslog
+
+遇到的第一个错误。
 
 ```
 launch_cvd I 03-07 18:46:44    51    51 main.cc:186] Host changed from last run: 1
@@ -34,6 +78,8 @@ launch_cvd E 03-07 18:46:50    51    51 main.cc:243] assemble_cvd returned -1
 
 [syslog - No logs are written to /var/log - Ask Ubuntu](https://askubuntu.com/questions/615457/no-logs-are-written-to-var-log)
 
+WSL 的 rsyslog 服务没有自动启动，可以用下面的命令手动启动。
+
 `sudo service rsyslog start`
 
 ### socket 长度
@@ -56,9 +102,9 @@ launch_cvd E 03-07 18:51:48   536   536 main.cc:271] run_cvd returned -1
 
 稍微搜了一下源码，`Unable to get group id for group virtaccess` 没有问题。
 
-下面的 socket 创建失败，仔细一看，是 socket 路径的长度超出了 unix 的限制(108 字节)
+下面的 socket 创建失败，仔细一看，是 socket 名字的长度超出了 unix 的限制(108 字节)
 
-看来我的路径太长了，移动到上级目录解决。
+应该是我的路径太长了，移动到上级目录解决。
 
 ### kvm 权限
 
@@ -83,7 +129,7 @@ $ ls /dev/kvm -l
 crw------- 1 root root 10, 232 Mar  7 18:34 /dev/kvm
 ```
 
-手动修改，不过下次启动估计就没了
+手动修改，不过下次启动估计就没了，要研究一下怎么在开机的时候自动修改。
 
 ### 网络接口
 
@@ -128,11 +174,24 @@ run_cvd I 03-07 20:04:05 23837 23837 process_monitor.cc:120] Subprocess /home/fi
 
 https://cs.android.com/android/platform/superproject/+/master:external/crosvm/devices/src/virtio/vhost/vsock.rs;l=37;drc=5ca657189aac546af0aafaba11bbc9c5d889eab3
 
-`/dev/vhost-vsock` ，检查发现也没有。
+`/dev/vhost-vsock` ，检查发现文件不存在。
 
-编译 wsl 内核，加上 `CONFIG_VHOST_VSOCK`
+万不得已还得自己编译 wsl 内核，加上配置 `CONFIG_VHOST_VSOCK`
 
-这样 `/dev` 下就有 `vhost-vsock` 了，不过也要手动修改权限。
+[microsoft/WSL2-Linux-Kernel: The source for the Linux kernel used in Windows Subsystem for Linux 2 (WSL2)](https://github.com/microsoft/WSL2-Linux-Kernel)
+
+[如何让WSL2使用自己编译的内核 - 知乎](https://zhuanlan.zhihu.com/p/324530180)
+
+[Advanced settings configuration in WSL | Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#configure-global-options-with-wslconfig)
+
+编译完成后把 `arch/x86/boot/bzImage` 拉出来，创建 `%UserProfile%\.wslconfig` ，添加如下配置即可使用自定义内核启动：
+
+```
+[wsl2]
+kernel=path\\to\\wsl
+```
+
+这样 `/dev` 下就有 `vhost-vsock` 了，不过和 `/dev/kvm` 一样，也要记得修改用户组和权限。
 
 ### minijail
 
@@ -158,7 +217,7 @@ strace ：
 [pid 23377] <... mount resumed>)        = -1 EINVAL (Invalid argument)
 ```
 
-源码大概在这里：
+源码大概在这里(AOSP)：
 
 ```
 external/minijail/libminijail.c
