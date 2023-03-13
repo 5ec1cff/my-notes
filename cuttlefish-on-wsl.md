@@ -261,10 +261,86 @@ WebRTC:
 
 也是一样卡，就比 WebRTC 好那么一点点。
 
-总体感觉不如 AVD …… 如果不是为了研究内核，没必要大费周章。
+## 体验
 
-## 总结
+为了方便，写了一段自动准备 cuttlefish 运行所需环境的脚本（当然内核还是得自己编译的）
 
-想在 WSL 上正常跑 cuttlefish 用于研究，还需要走一段时间的路。
+```sh
+if [ "$(id -u)" != "0" ]; then
+  echo "run as root"
+  sudo $0 $*
+  exit
+fi
 
-再次感受到瘟斗士用户的艰难，不如干脆把主力系统换成 Linux 罢！
+abort() {
+  echo "failed: $1"
+  exit 1
+}
+
+set_perm() {
+  path=$1
+  echo "changing permission of $path ..."
+  chown root:kvm "$path" || abort "chown"
+  chmod 660 "$path" || abort "chmod"
+}
+
+echo "Starting rsyslog ..."
+service rsyslog start || abort "rsyslog"
+echo "Starting cuttlefish host resource ..."
+service cuttlefish-host-resources start || abort
+
+set_perm /dev/kvm
+set_perm /dev/vhost-vsock
+```
+
+说来也怪，自从上次成功启动后，这次的启动也正常了，没有再遇到 mount 的问题。
+
+虽然之前觉得 WebRTC 卡，不过用久了还是能习惯的，毕竟 AVD 其实也没好到哪里去。
+
+系统的配置默认是双核 2G 内存，里面甚至还有 TEE 环境。
+
+![](res/images/20230313_01.png)
+
+## KernelSU
+
+折腾 Cuttlefish 的目的其实也是为了方便研究 KernelSU 和其他内核相关的东西，那么现在就来装一个 ksu 吧！
+
+但是 KSU 好像也没有提供 cuttlefish 的镜像，因此我们需要自己编译。
+
+### 确定版本
+
+按照以前的经验，首先的想法是找到当前内核在 android 仓库的的同一个提交，不然内核模块没法兼容。
+
+/proc/version:
+
+```
+Linux version 5.15.78-android13-8-00014-gaa272796660e-ab9611439 (build-user@build-host) (Android (8508608, based on r450784e) clang version 14.0.7 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6), LLD 14.0.7) #1 SMP PREEMPT Wed Feb 15 16:10:20 UTC 2023
+```
+
+版本号的 g 后面应该就是 commit hash 。
+
+[android13-5.15 发布 build  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/core/architecture/kernel/gki-android13-5_15-release-builds?hl=zh-cn)
+
+在历史记录里面确实有这个 commit (aa272796660e9fd9903bc6b13ffa25de53d99a8c)： https://android.googlesource.com/kernel/common/+/aa272796660e
+
+不过现在是 GKI 内核，根据官方文档，其实不需要 commit 一致，只要 KMI 版本一致即可确保内核模块兼容（？）。
+
+[GKI 版本控制  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/core/architecture/kernel/gki-versioning?hl=zh-cn)
+
+那么我们的 KMI 版本应该是 `5.15-android13-8`
+
+内核的 Version 和 PatchLevel 可以在 `common/Makefile` 看到，比如： https://android.googlesource.com/kernel/common/+/f4559cb66624fae88cdc34154c21979e58ce7c36/Makefile
+
+但是我们怎么从内核源码知道当前的 Kmi Generation 呢？搜索 `KMI_GENERATION` ，发现在 `common/build.config.common` 里面。
+
+例如 common-android13-5.15: https://android.googlesource.com/kernel/common/+/f4559cb66624fae88cdc34154c21979e58ce7c36/build.config.common
+
+KMI_GENERATION 是 8 ，和我们的内核一致。
+
+### 下载内核
+
+[构建内核  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/setup/build/building-kernels?hl=zh-cn)
+
+[Repo 命令参考资料  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/setup/create/repo?hl=zh-cn#init)
+
+TO BE CONTINUED ……
