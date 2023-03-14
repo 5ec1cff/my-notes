@@ -344,3 +344,93 @@ KMI_GENERATION 是 8 ，和我们的内核一致。
 [Repo 命令参考资料  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/setup/create/repo?hl=zh-cn#init)
 
 TO BE CONTINUED ……
+
+下载 repo ：
+
+[repo](https://gerrit.googlesource.com/git-repo/+/HEAD/README.md)
+
+```sh
+mkdir -p ~/.bin
+PATH="${HOME}/.bin:${PATH}"
+curl https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
+chmod a+rx ~/.bin/repo
+```
+
+首次使用会先 clone repo 自己的源码
+
+```
+repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15
+repo sync
+```
+
+……
+
+参考 KernelSU gh actions workflow：
+
+https://github.com/tiann/KernelSU/blob/5dd430e6a6cc7ca7e479d438354fb95abb3aafc8/.github/workflows/gki-kernel.yml
+
+```
+      - name: Setup kernel source
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone https://gerrit.googlesource.com/git-repo
+          mkdir android-kernel && cd android-kernel
+          ../git-repo/repo init --depth=1 --u https://android.googlesource.com/kernel/manifest -b common-${{ inputs.tag }}
+          ../git-repo/repo sync -j$(nproc --all)
+```
+
+官方文档提到 A13 开始用 bazel 替代 build/build.sh ，不过没看明白怎么用。
+
+ksu 的 ci 就是用 build.sh 的，因此直接抄过来。
+
+https://github.com/tiann/KernelSU/blob/main/.github/workflows/gki-kernel.yml#L129
+
+需要注意 `LTO=thin` ，如果不开会在 LTO 阶段 OOM ，起码我的设备是这样的。
+
+```sh
+CCACHE=/usr/bin/ccache CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=2G CCACHE_HARDLINK=true LTO=thin BUILD_CONFIG=common/build.config.gki.x86_64 build/build.sh
+```
+
+构建完成后产生了 `out/android13-5.15/dist/boot.img` ，直接拿到 cuttlefish 启动试试。
+
+等了大约两分钟启动才成功（两分钟前内核日志都出来了），因此跑 cvd 还是太慢了。
+
+加上 KernelSU 再编译，也能成功启动，ksu 成功激活。
+
+![](res/images/20230314_01.png)
+
+另外很奇怪的一件事是，stat /system/bin/su 竟然找不到，按理来说授予权限后应该得到和 /system/bin/sh 一样的结果。不过 su 还是能正常执行的，包括 shell 和 app （下图为 MT 管理器）。
+
+![](res/images/20230314_02.png)
+
+发现 zygisksu 的 zygiskd 挂了
+
+```
+03-14 19:19:12.524   550   550 I zygisksu: Start watchdog
+03-14 19:19:12.694   541   541 I zygiskwd: zygiskd::watchdog: Start zygisksu watchdog
+03-14 19:19:12.695   541   541 I zygiskwd: zygiskd::watchdog: Check permission
+03-14 19:19:12.695   541   541 I zygiskwd: zygiskd::watchdog: Ensure single instance
+03-14 19:19:12.695   541   541 I zygiskwd: zygiskd::watchdog: Mount module.prop
+03-14 19:19:12.696   541   541 E zygiskwd: zygiskd: Crashed: No such file or directory (os error 2)
+03-14 19:19:12.696   541   541 E zygiskwd: disabled backtrace
+```
+
+> 由于上面的 bug ，/system/bin/su 无法正常 stat ，导致 adb 也无法正常启动 ksu 的 sh ，系统的 su 又不支持 -c ，所以跑 installKsu task 总是失败，还得手动安装……
+
+webrtc 的键盘输入也有 bug ，默认关闭，打开之后连触屏都不行了。
+
+编译 zygisksu debug 版，上面的问题又没了，zygiskd 正常工作，但是 zygote 收不到 fd 。检查 logcat avc ：
+
+```
+03-14 20:12:19.020 10080 10080 W main    : type=1400 audit(0.0:424): avc: denied { read write } for path=/memfd:jit-cache (deleted) dev="tmpfs" ino=570 scontext=u:r:zygote:s0 tcontext=u:object_r:appdomain_tmpfs:s0 tclass=file permissive=0
+```
+
+少了 `appdomain_tmpfs` 规则，不知道为什么不加上去
+
+```
+allow zygote appdomain_tmpfs file *
+allow zygote appdomain_tmpfs dir *
+```
+
+> 群里提过 https://t.me/KernelSU_group/3249/32373
+
