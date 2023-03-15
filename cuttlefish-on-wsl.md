@@ -343,8 +343,6 @@ KMI_GENERATION 是 8 ，和我们的内核一致。
 
 [Repo 命令参考资料  |  Android 开源项目  |  Android Open Source Project](https://source.android.com/docs/setup/create/repo?hl=zh-cn#init)
 
-TO BE CONTINUED ……
-
 下载 repo ：
 
 [repo](https://gerrit.googlesource.com/git-repo/+/HEAD/README.md)
@@ -363,9 +361,9 @@ repo init -u https://android.googlesource.com/kernel/manifest -b common-android1
 repo sync
 ```
 
-……
+经过漫长的等待……最后还是没下完，已经烧了 5G 梯子流量了。
 
-参考 KernelSU gh actions workflow：
+参考 KernelSU gh actions workflow ，发现 repo 其实也可以指定 clone depth：
 
 https://github.com/tiann/KernelSU/blob/5dd430e6a6cc7ca7e479d438354fb95abb3aafc8/.github/workflows/gki-kernel.yml
 
@@ -379,13 +377,15 @@ https://github.com/tiann/KernelSU/blob/5dd430e6a6cc7ca7e479d438354fb95abb3aafc8/
           ../git-repo/repo sync -j$(nproc --all)
 ```
 
+### build
+
 官方文档提到 A13 开始用 bazel 替代 build/build.sh ，不过没看明白怎么用。
 
 ksu 的 ci 就是用 build.sh 的，因此直接抄过来。
 
 https://github.com/tiann/KernelSU/blob/main/.github/workflows/gki-kernel.yml#L129
 
-需要注意 `LTO=thin` ，如果不开会在 LTO 阶段 OOM ，起码我的设备是这样的。
+需要注意加上环境变量 `LTO=thin` ，如果不开，最后 LTO vmlinux 的时候会 OOM ，起码我的设备是这样的。
 
 ```sh
 CCACHE=/usr/bin/ccache CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=2G CCACHE_HARDLINK=true LTO=thin BUILD_CONFIG=common/build.config.gki.x86_64 build/build.sh
@@ -398,6 +398,8 @@ CCACHE=/usr/bin/ccache CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=2G CCACHE_HARDLINK=t
 加上 KernelSU 再编译，也能成功启动，ksu 成功激活。
 
 ![](res/images/20230314_01.png)
+
+### misc
 
 另外很奇怪的一件事是，stat /system/bin/su 竟然找不到，按理来说授予权限后应该得到和 /system/bin/sh 一样的结果。不过 su 还是能正常执行的，包括 shell 和 app （下图为 MT 管理器）。
 
@@ -434,3 +436,117 @@ allow zygote appdomain_tmpfs dir *
 
 > 群里提过 https://t.me/KernelSU_group/3249/32373
 
+### ccache
+
+[ccache使用简介 - 掘金](https://juejin.cn/post/7165510954850418719#heading-6)
+
+昨天多次编译的时候观察到 ccache 看起来并没有用到，今天检查发现确实如此，没有任何缓存：
+
+```sh
+~/cuttle/kernel$ ccache -s
+cache directory                     /home/five_ec1cff/.ccache
+primary config                      /home/five_ec1cff/.ccache/ccache.conf
+secondary config      (readonly)    /etc/ccache.conf
+cache hit (direct)                     0
+cache hit (preprocessed)               0
+cache miss                             0
+cache hit rate                      0.00 %
+cleanups performed                     0
+files in cache                         0
+cache size                           0.0 kB
+max cache size                       5.0 GB
+```
+
+编译命令的那个 CCACHE 环境变量让我很迷惑，因为 build 目录下没有任何用到这个环境变量的。
+
+仔细研究了 ksu 的 actions ，发现原来还有个 patch ，增加了 ccache 支持：
+
+https://github.com/tiann/KernelSU/blob/5dd430e6a6cc7ca7e479d438354fb95abb3aafc8/.github/workflows/gki-kernel.yml
+
+```
+cd $GKI_ROOT/common/ && git apply $GITHUB_WORKSPACE/KernelSU/.github/patches/$PATCH_PATH/*.patch
+```
+
+https://github.com/tiann/KernelSU/blob/5dd430e6a6cc7ca7e479d438354fb95abb3aafc8/.github/patches/5.15/0001-Makefile-Use-CCACHE-for-faster-compilation.patch
+
+实际上就是在 CC 等命令前面加上 ccache ，让 ccache 包装它们。
+
+那我们也手动 patch 一下：
+
+```
+~/cuttle/kernel/common$ git apply ~/KernelSU/.github/patches/5.15/0001-Makefile-Use-CCACHE-for-faster-compilation.patch
+```
+
+这样 build 的时候就可以缓存了。
+
+但是 hit 的概率很低：
+
+```
+secondary config      (readonly)    /etc/ccache.conf
+stats updated                       Wed Mar 15 12:31:35 2023
+cache hit (direct)                   275
+cache hit (preprocessed)              50
+cache miss                          6137
+cache hit rate                      5.03 %
+called for link                     5345
+called for preprocessing            3132
+compiler produced empty output      1924
+ccache internal error                  4
+preprocessor error                   136
+cache file missing                     4
+unsupported source language            8
+unsupported code directive            12
+no input file                       1044
+cleanups performed                     4
+files in cache                     17488
+cache size                           1.8 GB
+max cache size                       5.0 GB
+```
+
+对比 ksu 的 CI ：
+
+```
+  Summary:
+    Hits:            3026 / 3044 (99.41 %)
+      Direct:        3010 / 4049 (74.34 %)
+      Preprocessed:    16 /  983 (1.63 %)
+    Misses:            18
+      Direct:        1039
+      Preprocessed:   967
+    Uncacheable:     3023
+  Primary storage:
+    Hits:            6044 / 8042 (75.16 %)
+    Misses:          1998
+    Cache size (GB): 0.93 / 2.00 (46.42 %)
+```
+
+### sucompat stat kprobes 问题
+
+```
+[    2.073023] KernelSU: sucompat: execve_kp: 0
+[    2.111204] KernelSU: sucompat: newfstatat_kp: -2
+[    2.201399] KernelSU: sucompat: faccessat_kp: 0
+```
+
+sucompat 中，对于内核版本大于 4.11 ，hook stat 用的是 `vfs_statx` 这个符号
+
+而系统中的 vfs_statx 却被加上了这个后缀：
+
+```
+vsoc_x86_64:/ # grep statx /proc/kallsyms
+0000000000000000 t vfs_statx.llvm.1981366613533052330
+```
+
+相关代码：
+
+https://cs.android.com/android-llvm/toolchain/llvm-project/+/master:llvm/include/llvm/IR/ModuleSummaryIndex.h;l=1104;drc=2946cd701067404b99c39fb29dc9c74bd7193eb3
+
+看了一下发现还是和 LTO （Link Time Optimize）有关，可能是 vfs_statx 被内联了。
+
+把 `LTO=thin` 改成 `LTO=none` ，出来的符号就正常了。不过应该有更好的方法避免被内联。
+
+### TODO: 再次运行后没有保留数据
+
+cuttlefish 虽然和 avd 一样可以重启，并且在虚拟机运行的时候，在系统内重启，可以保留数据，但是只要 stop 后再 launch ，之前的数据都丢失了。
+
+这样对调试很不方便，毕竟不是每次都需要全新的系统的。
