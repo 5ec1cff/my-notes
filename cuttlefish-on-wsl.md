@@ -550,3 +550,5 @@ https://cs.android.com/android-llvm/toolchain/llvm-project/+/master:llvm/include
 cuttlefish 虽然和 avd 一样可以重启，并且在虚拟机运行的时候，在系统内重启，可以保留数据，但是只要 stop 后再 launch ，之前的数据都丢失了。
 
 这样对调试很不方便，毕竟不是每次都需要全新的系统的。
+
+> 看起来似乎是更换 boot 的时候会清空数据
