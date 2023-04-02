@@ -50,8 +50,8 @@ bcs we didn't find a proper way to fix unbounded domain transitions under nnp/no
 
 1. ~~new su~~  
 2. ~~ksud embed su~~  
-3. ~~内核重定向 su execve~~
-4. 实现临时目录  
+3. ~~内核重定向 su execve~~  
+4. ~~实现临时目录~~  
 
 ![](res/images/20230317_01.png)
 

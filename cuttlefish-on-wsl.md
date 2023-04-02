@@ -553,6 +553,22 @@ cuttlefish 虽然和 avd 一样可以重启，并且在虚拟机运行的时候�
 
 > 看起来似乎是更换 boot 的时候会清空数据
 
+### TODO: webrtc 触摸问题
+
+经常出现在 webrtc 中触摸没反应的情况，此时出现一大堆这样的日志：
+
+```
+03-20 16:59:22.172   672   787 W InputReader: Received unexpected event (0x36, 0x38a) for slot 0 with tracking id -1
+03-20 16:59:22.188   672   787 W InputReader: Received unexpected event (0x35, 0x1b5) for slot 0 with tracking id -1
+03-20 16:59:22.188   672   787 W InputReader: Received unexpected event (0x36, 0x397) for slot 0 with tracking id -1
+03-20 16:59:22.222   672   787 W InputReader: Received unexpected event (0x35, 0x1aa) for slot 0 with tracking id -1
+03-20 16:59:22.222   672   787 W InputReader: Received unexpected event (0x36, 0x39d) for slot 0 with tracking id -1
+03-20 16:59:22.255   672   787 W InputReader: Received unexpected event (0x35, 0x1b0) for slot 0 with tracking id -1
+03-20 16:59:22.255   672   787 W InputReader: Received unexpected event (0x36, 0x382) for slot 0 with tracking id -1
+```
+
+本来以为开了键盘才有这种问题，现在不开也能碰到，cuttlefish 问题真的太多了，不得已要用 scrcpy ，但 scrcpy 也经常开不起来。
+
 ### build 前不执行 clean
 
 发现 build.sh 每次编译前都默认清理了上次的产物，导致每次编译都很慢。
