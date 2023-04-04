@@ -158,3 +158,152 @@ def setup_ndk(args):
 在 emulator 跑一下：
 
 ![](res/images/20220917_07.png)
+
+# 2023.04.03
+
+已经很久没更新过 avd 上的 magisk 了，现在打算用 lsp 的 metagisk ，因为有西大师亲自编写的 native bridge
+
+实际上我自从用上 kernelsu 已经好久没有用过 magisk 了，wsl 嵌套 cuttlefish 虽然可以 kernelsu 但是很难用，又懒得研究 avd 怎么加载内核，而用现成的 apk 进行 avd magisk 又不好使了，只能自己编译。
+
+## 吐血的 rust
+
+```
+C:\Users\mspri\AppData\Local\Android\Sdk\ndk\magisk\toolchains\rust\bin\cargo.exe external\cxx-rs\gen\cmd
+  Installing cxxbridge-cmd v1.0.72 (D:\codes\magisk_source\master\Magisk\native\src\external\cxx-rs\gen\cmd)
+error: failed to compile `cxxbridge-cmd v1.0.72 (D:\codes\magisk_source\master\Magisk\native\src\external\cxx-rs\gen\cmd)`, intermediate artifacts can be found at `D:\codes\magisk_source\master\Magisk\native\src\external\cxx-rs\target`
+
+Caused by:
+  failed to get `clap` as a dependency of package `cxxbridge-cmd v1.0.72 (D:\codes\magisk_source\master\Magisk\native\src\external\cxx-rs\gen\cmd)`
+
+Caused by:
+  failed to load source for dependency `clap`
+
+Caused by:
+  Unable to update registry `crates-io`
+
+Caused by:
+  usage of sparse registries requires `-Z sparse-registry`
+
+cxxbridge-cmd installation failed!
+
+mv .cargo\config.toml.bak -> .cargo\config.toml
+```
+
+ONDK 的 cargo 还在 1.65 ，而我系统里面的 cargo 是 1.68 ，之前配置了 config ， registry 用了 sparse index
+
+https://blog.rust-lang.org/inside-rust/2023/01/30/cargo-sparse-protocol.html
+
+临时解决办法是把 `%UserProfile%\.cargo\config` 改名
+
+## 我 jdk 去哪了？
+
+```
+ERROR: JAVA_HOME is set to an invalid directory: C:\Program Files\Android\Android Studio\jre
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation.
+
+Build app failed!
+```
+
+更新了 AS 之后，自带 jre 竟然消失了……
+
+搜索了一下 jlink 的位置，发现没消失，只是改名叫 jbr 了：`C:\Program Files\Android\Android Studio\jbr`
+
+## L.S.偏执狂
+
+```
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':buildSrc:compileKotlin'.
+> Could not resolve all files for configuration ':buildSrc:compileClasspath'.
+   > Could not resolve org.lsposed.lsparanoid:gradle-plugin:0.5.0.
+     Required by:
+         project :buildSrc
+      > No matching variant of org.lsposed.lsparanoid:gradle-plugin:0.5.0 was found. The consumer was configured to find a library for use during compile-time, compatible with Java 11, preferably not packaged as a jar, preferably optimized for standard JVMs, and its dependencies declared externally, as well as attribute 'org.gradle.plugin.api-version' with value '8.0.1', attribute 'org.jetbrains.kotlin.platform.type' with value 'jvm' but:
+          - Variant 'apiElements' capability org.lsposed.lsparanoid:gradle-plugin:0.5.0 declares a library for use during compile-time, packaged as a jar, preferably optimized for standard JVMs, and its dependencies declared externally, as well as attribute 'org.jetbrains.kotlin.platform.type' with value 'jvm':
+              - Incompatible because this component declares a component, compatible with Java 17 and the consumer needed a component, compatible with Java 11
+              - Other compatible attribute:
+```
+
+https://github.com/LSPosed/LSParanoid
+
+> Note that you should use at least Java 17 to launch the gradle daemon for this plugin (this is also required by AGP 8+). The project that uses this plugin on the other hand does not necessarily to target Java 17.
+
+看来 AS JDK 也不行了，只好用 MS 的 JDK 17
+
+## 历史遗留产物
+
+世界上最讨厌的事情就是执行 gradle task 报错，一看 stack trace 根本没有自己的类——我怎么知道哪里错了！
+
+```
+* What went wrong:
+Execution failed for task ':stub:processDebugManifestForPackage'.
+> A failure occurred while executing com.android.build.gradle.tasks.ProcessPackagedManifestTask$WorkItem
+   > Attribute "appComponentFactory" bound to namespace "http://schemas.android.com/apk/res/android" was already specified for element "application".
+
+```
+
+看起来是合并 manifest 出现的问题，appComponentFactory 似乎被重复了。
+
+在 stub 的 build 目录下查找：
+
+```
+stub\build\intermediates\manifest_merge_blame_file\debug\manifest-merger-blame-debug-report.txt
+
+29    <application
+29-->D:\codes\magisk_source\master\Magisk\stub\src\main\AndroidManifest.xml:10:5-11:19
+30        android:name="o.x"
+30-->D:\codes\magisk_source\master\Magisk\stub\src\debug\AndroidManifest.xml:12:9-27
+31        android:allowBackup="false"
+31-->[:app:shared] D:\codes\magisk_source\master\Magisk\app\shared\build\intermediates\merged_manifest\debug\AndroidManifest.xml:28:9-36
+32        android:appComponentFactory="j.I"
+32-->D:\codes\magisk_source\master\Magisk\stub\src\debug\AndroidManifest.xml:11:9-42
+33        android:debuggable="true"
+34        android:extractNativeLibs="false"
+35        android:label="Magisk"
+```
+
+里面只有一个 appComponentFactory
+
+但是看到最终合并的结果：
+
+```
+stub\build\intermediates\merged_manifest\debug\AndroidManifest.xml
+
+    <application
+        android:appComponentFactory="s.p"
+        android:name="uGK.G1"
+        android:name="o.x"
+        android:allowBackup="false"
+        android:appComponentFactory="j.I"
+        android:debuggable="true"
+        android:extractNativeLibs="false"
+        android:label="Magisk"
+        android:requestLegacyExternalStorage="true"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        android:usesCleartextTraffic="true" >
+```
+
+不仅 appComponentFactory 重复了，甚至 name 也重复了。
+
+发现 stub/src 下有 debug 和 release 目录包含了 AndroidManifest ，这两个目录被 gitignore 了，看起来是生成的目录，从创建时间上看也确实，因此是以前编译的遗留产物。
+
+```
+Magisk\stub\src\debug\AndroidManifest.xml
+
+    <application
+        android:appComponentFactory="j.I"
+        android:name="o.x"
+        tools:ignore="GoogleAppIndexingWarning,MissingApplicationIcon,UnusedAttribute">
+```
+
+就是这里提供了错误的 appComponentFactory 和 name ，在 `stub\build\generated\source\obfuscate` 还能看到这两个类。
+
+上面的应该是旧的混淆方法，现在新的混淆类放在了 `stub\build\generated\source\app|factory` 里面。
+
+删掉 src 下面的两个生成的目录，总算可以过编译了。然而为何生成的东西放在 src 下面，而且 clean 的时候竟然也没被清掉？magisk 的暗坑还是太多了。
+
+
