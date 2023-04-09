@@ -1280,8 +1280,24 @@ drivers/kernelsu/ksu.h:#define KERNEL_SU_VERSION (10000 + KSU_GIT_VERSION + 200)
 
 原来是 WSL 的 PATH 自动插入了 host Windows 的 PATH ，而这些来自 Windows 的 PATH 含有空格，Makefile 的 `PATH=$$PATH` 又没有加引号，所以通过字符串拼接得到的命令是错误的，git 命令没有被调用……真的是太坑了。
 
-说到 Makefile 获取版本号这一行代码，其实曾经就有人改过：
+当然可以临时修改 PATH ，如果正确且没有空格就能正常获取版本。
 
-https://github.com/tiann/KernelSU/commit/ecd5af76ab87ef322553c86afb205620399e6934
+后来提了个 [PR](https://github.com/tiann/KernelSU/pull/363) 修了这个问题
 
-一开始写死了路径 `/usr/bin/git` ，后来就被改成了在 PATH 查找 git ，事实证明这个代码还是有问题。
+### filter-branch
+
+由于之前提交的时候随便写了 git 用户名和邮箱，因此现在需要修改，顺便还要把之前加入的 dtc 删掉。
+
+[Git - 重写历史](https://git-scm.com/book/zh/v2/Git-%E5%B7%A5%E5%85%B7-%E9%87%8D%E5%86%99%E5%8E%86%E5%8F%B2)
+
+```
+FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --tree-filter 'rm -rf dtc' --commit-filter '
+        if [ "$GIT_AUTHOR_NAME" = "AAA" ];
+        then
+                GIT_AUTHOR_NAME="5ec1cff";
+                GIT_AUTHOR_EMAIL="ewtqyqyewtqyqy@gmail.com";
+                git commit-tree "$@";
+        else
+                git commit-tree "$@";
+        fi' HEAD --not 61e4abf674639d # 防止重写 grafted commit
+```
