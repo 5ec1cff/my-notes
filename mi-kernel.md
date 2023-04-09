@@ -1209,3 +1209,79 @@ su 功能也是正常的，包括 prctl su 和 su compat 。
 
 总之现在 ksu 已经可用了，也许该考虑迁移 magisk 到 ksu 了？是时候也该体验以下我参与了小部分开发的 ZygiskOnKernelSU ，最好还能提交点新代码，不然对不住空大师给我挂上去的名字。
 
+## 整理仓库
+
+之前编译的内核源码是从 github 上下载的 zip ，因为当时梯子质量不佳，git clone 用 http 容易断（而且不知道有 depth 这回事）。
+
+现在梯子质量好了，可以用 git clone 原仓库了，想要把这些更改合并到提交树上，但是 git 默认阻止合并不相关历史的分支。
+
+```
+fatal: refusing to merge unrelated histories
+```
+
+https://stackoverflow.com/a/63660939
+
+可以通过 `--allow-unrelated-histories` 来强制允许合并，在这种情况下，两个仓库的相同位置的相同的文件，是不会产生冲突的，只有相同位置不同的文件才需要解决这些冲突以继续合并（和一般的分支合并无异）。这里我在本地的新目录浅 clone 了 xiaomi opensource 的仓库，然后添加 remote old 为本地原来仓库的 url (`file:///path/to/old/repository/.git`)，fetch 后再强制合并。
+
+此外使用了浅克隆（shallow clone ，`--depth=1`）是不能推送到远程的，此时那个 commit 有一个 `grafted` 标记。
+
+[Git 基础操作 · LCTT Wiki](https://lctt.github.io/wiki/tutorials/gitbasic.html)
+
+通过 `git fetch --unshallow` 可以重新获取完整的提交记录，这样就能 push 。考虑到仅仅 `depth=1` clone 的仓库就有 1.2G 的大小，还是暂时不 unshallow 了。
+
+[Git - grafted 和 shallow update not allowed - zjffun - 博客园](https://www.cnblogs.com/jffun-blog/p/10327386.html)
+
+这篇文章说也可以 `git filter-branch -- --all` 洗掉这个 `grafted` 标记，不过这样应该就没有旧的记录了。
+
+### dtc
+
+编译内核需要 dtc ，原来的 dtc 是从 AOSP 下载的源码，要在 build.sh 执行之前先 make 一下 dtc 。
+
+以前还能正常 make ，现在却出现这种错误：
+
+```
+/usr/bin/ld: dtc-parser.tab.o:/home/five_ec1cff/mi/Xiaomi_Kernel_OpenSource-picasso-r-oss/dtc/dtc-parser.tab.c:1086: multiple definition of `yylloc'; dtc-lexer.lex.o:/home/five_ec1cff/mi/Xiaomi_Kernel_OpenSource-picasso-r-oss/dtc/dtc-lexer.l:41: first defined here
+```
+
+没办法只好用 master 分支的 dtc ，这样起码能过编译，顺便把源码里面的 dtc 删掉了。
+
+其实我们根本不需要编译 dtb ，因为 dtb 直接用的 stock boot ，但是不知道怎么让它不编译。
+
+### 一个缺少引号引发的血案
+
+在手机上刷入 ksu 后，发现 ZygiskOnKernelSU 不工作，提示 root implementation too old ，一看 manager ，版本居然是 10200 ，Manager 都 10733 了。
+
+KSU 的版本由 commit 数决定，在 Makefile 中：
+
+```
+# .git is a text file while the module is imported by 'git submodule add'.
+ifeq ($(shell test -e $(srctree)/$(src)/../.git; echo $$?),0)
+KSU_GIT_VERSION := $(shell cd $(srctree)/$(src); /usr/bin/env PATH=$$PATH:/usr/bin:/usr/local/bin git rev-list --count HEAD)
+ccflags-y += -DKSU_GIT_VERSION=$(KSU_GIT_VERSION)
+endif
+```
+
+最后版本的计算方式如下：
+
+```
+drivers/kernelsu/ksu.h:#define KERNEL_SU_VERSION (10000 + KSU_GIT_VERSION + 200) // major * 10000 + git version + 200 for historical reasons
+```
+
+在 drivers/kernelsu 下执行 `git rev-list --count HEAD` ，拿到的确实是正确的 count (737) 。
+
+但是观察 `out/drivers/kernelsu` 下的 `.cmd` ，发现定义 `-DKSU_GIT_VERSION=` 都是空的。
+
+注意到编译的时候总是出现这一条消息：
+
+```
+/usr/bin/env: ‘Files/WindowsApps/MicrosoftCorporationII.WindowsSubsystemForLinux_1.1.6.0_x64__8wekyb3d8bbwe:/mnt/c/Program’: No such file or directory
+  Using .. as source for kernel
+```
+
+原来是 WSL 的 PATH 自动插入了 host Windows 的 PATH ，而这些来自 Windows 的 PATH 含有空格，Makefile 的 `PATH=$$PATH` 又没有加引号，所以通过字符串拼接得到的命令是错误的，git 命令没有被调用……真的是太坑了。
+
+说到 Makefile 获取版本号这一行代码，其实曾经就有人改过：
+
+https://github.com/tiann/KernelSU/commit/ecd5af76ab87ef322553c86afb205620399e6934
+
+一开始写死了路径 `/usr/bin/git` ，后来就被改成了在 PATH 查找 git ，事实证明这个代码还是有问题。
