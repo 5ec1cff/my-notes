@@ -97,7 +97,7 @@ HuskyDG 的 magisk_overlayfs ，或许处理了这个问题，因为它的处理
 
 ### Magisk
 
-Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 PR 解决：
+Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 PR 解决（即将出现在 Magisk 26.1）：
 
 [Refactor magic mount to support overlayfs by yujincheng08 · Pull Request #6588 · topjohnwu/Magisk](https://github.com/topjohnwu/Magisk/pull/6588/commits/5817cda0a4b30d18d48a04613fe1ed47f3e0a01d)
 
@@ -178,7 +178,7 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 
 方法无非两个：选择另一个空的目录作为 upperdir 或加入 lowerdir 。
 
-考虑到节省系统资源，我们 mount 一个大小 0k 的只读 tmpfs ，作为所有 lowerdir 单一的挂载点的填充。
+考虑到节省系统资源，我们 mount 一个大小 0k 的只读 tmpfs ，作为所有 lowerdir 单一的挂载点的填充（dummy tmpfs）。
 
 注意这种情况下，它必须作为 lowerdir 的最下层，否则文件会被加上奇怪的 t 属性位。
 
@@ -198,18 +198,19 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
  
 此外还有直接 bind mount 一个文件的奇葩情况（上文的 GSI 系统就属此例），此时原挂载点不能作为 overlayfs 的 lowerdir 。
 
-经过考虑，发现原先的 DUMMY path 设计可以移除了，并且处理了 regular file bind mount 的情况：
+重新考虑了一下，新方案可以处理 regular file bind mount 的情况：
 
-1. 挂载点下没有模块修改，此时也不需要 overlay 了，直接 bind mount 。  
+1. 挂载点下没有模块修改，此时也不需要 overlay 了，直接 bind mount （dummy tmpfs 可以丢掉了）。  
 2. 挂载点下有模块修改，原本是目录，此时 overlay ，合并模块和 stock 挂载点。  
 3. 挂载点下有模块修改，原本是普通文件，此时不需要任何 mount （因为没有旧目录需要合并），下层的 overlay 处理了一切。  
 
 判断 stock mount 是不是 regular file 只要 stat 我们打开的 fd 即可
 
-
 ## POC
 
-https://gist.github.com/5ec1cff/d3f7623ab0feae082d6b7854e85b1112
+https://github.com/5ec1cff/ksu-mount-POC
+
+~~由于不会 Rust 只好用 C++ 写了~~
 
 ### 实现分析
 
