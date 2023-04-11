@@ -193,10 +193,19 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 在群里讨论之后，发现上面的做法仍然存在问题，比如 vfat 无法作为 overlay 的 lowerdir (`/vendor/bt_firmware`)，这种情况下也许只能 fallback 为 bind mount 了。
 
 > 也就是说，不能修改上面的文件，不过应该没人会改 firmware 吧。
- 
-此外还有直接 bind mount 一个文件的奇葩情况（上文的 GSI 系统就属此例），overlayfs 也没法处理。这种情况下我们可以判断，也许还可以同时把模块的相应文件 bind mount 上来。
 
 如果系统会叠两层 overlayfs 也无法处理。总之，mount overlay 失败的时候，fallback 成 mount bind 原目录 /proc/self/fd 是比较好的方法，起码确保了系统原始文件完整，而大部分模块也能正常工作。
+ 
+此外还有直接 bind mount 一个文件的奇葩情况（上文的 GSI 系统就属此例），此时原挂载点不能作为 overlayfs 的 lowerdir 。
+
+经过考虑，发现原先的 DUMMY path 设计可以移除了，并且处理了 regular file bind mount 的情况：
+
+1. 挂载点下没有模块修改，此时也不需要 overlay 了，直接 bind mount 。  
+2. 挂载点下有模块修改，原本是目录，此时 overlay ，合并模块和 stock 挂载点。  
+3. 挂载点下有模块修改，原本是普通文件，此时不需要任何 mount （因为没有旧目录需要合并），下层的 overlay 处理了一切。  
+
+判断 stock mount 是不是 regular file 只要 stat 我们打开的 fd 即可
+
 
 ## POC
 
