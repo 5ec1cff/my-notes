@@ -135,7 +135,7 @@ Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 P
 | - 3 /system/yyy bind mount
 | - 4 /system (ksu overlay)
     | - 5 /system/xxx (ksu overlay)
-	| - 6 /system/yyy (ksu overlay)
+    | - 6 /system/yyy (ksu overlay)
 ```
 
 这样的问题是，每一个 ksu overlay 都需要 lowerdir 提供原先目录的内容，然而在 `/system` 下挂载第一个 overlay 后，原先的内容被屏蔽了，怎么得到 lowerdir 呢？
@@ -271,7 +271,7 @@ findChildMountForPath： 找某个路径的直接子挂载点下的最上层挂�
     | 7 - /system/xxx
   | 3 - /system/yyy
       | 4 - /system/yyy
-	    | 5 - /system/yyy/zzz
+        | 5 - /system/yyy/zzz
 ```
 
 则 findChildMountForPath 找到的是 4, 7 。
