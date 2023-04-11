@@ -188,6 +188,14 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 
 这样 ro 挂载的问题算是有一个好的解决方案了，不过这种情况下想要扩展成 rw 就更加困难了。
 
+### 其他问题
+
+在群里讨论之后，发现上面的做法仍然存在问题，比如 vfat 无法作为 overlay 的 lowerdir (`/vendor/bt_firmware`)，这种情况下也许只能 fallback 为 bind mount 了。
+
+> 也就是说，不能修改上面的文件，不过应该没人会改 firmware 吧。
+
+如果系统会叠两层 overlayfs 也无法处理。总之，mount overlay 失败的时候，fallback 成 mount bind 原目录 /proc/self/fd 是比较好的方法，起码确保了系统原始文件完整，而大部分模块也能正常工作。
+
 ## POC
 
 https://gist.github.com/5ec1cff/d3f7623ab0feae082d6b7854e85b1112
@@ -297,7 +305,7 @@ findTopMostMountsUnderPath：实际上就是找某个路径下所有有效的（
 
 a, b, c 目录结构如下：
 
-···
+```
 tree a b c
 a
 ├── b # dir
@@ -307,7 +315,7 @@ b
 └── x # regular
 c
 └── zz # regular
-···
+```
 
 执行下面两个 bind mount ：
 
