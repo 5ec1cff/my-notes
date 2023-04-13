@@ -200,17 +200,26 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 
 重新考虑了一下，新方案可以处理 regular file bind mount 的情况：
 
-1. 挂载点下没有模块修改，此时也不需要 overlay 了，直接 bind mount （dummy tmpfs 可以丢掉了）。  
-2. 挂载点下有模块修改，原本是目录，此时 overlay ，合并模块和 stock 挂载点。  
-3. 挂载点下有模块修改，原本是普通文件，此时不需要任何 mount （因为没有旧目录需要合并），下层的 overlay 处理了一切。  
+首先确保我们在目标分区的新根挂载点一定是 overlayfs ，不然就是没有任何模块进行了修改，可以直接跳过。
 
-判断 stock mount 是不是 regular file 只要 stat 我们打开的 fd 即可
+而对子挂载点的修改，取决于模块、上层的 overlayfs 和原文件系统（stock mount）在对应目录的文件类型。
 
-## POC
+1. 挂载点在新的 overlayfs 中不再存在，这样可能是上级目录被模块替换成文件或删除了，我们什么也不用做。  
+2. 挂载点下没有模块修改，此时不需要 overlay 了，直接 bind mount stock（因此 dummy tmpfs 可以丢掉了）。  
+3. 挂载点下有模块修改，且 stock 是目录，修改后仍然是目录，此时我们挂载 overlayfs ，lowerdir 合并模块对应目录和 stock 挂载点。  
+4. 挂载点下有模块修改，且非 3 中的情况，则没有目录需要合并，我们不需要做任何事，下层的 overlay 会帮我们处理一切。  
+
+注1. 在情况 3 中，看起来我们没有考虑模块 replace 的情况，如果是 replace ，我们只要把模块的目录 bind mount 即可，不过这一点还是交给 overlayfs 处理好。
+
+注2. 4 中包含两种情况：(stock 是文件, 修改后是文件或目录)：这时候不需要合并 stock ，因此上层 overlayfs 已经合并了；(stock 是目录，模块修改后是文件)：此时也无需合并 stock 。
+
+判断 stock mount 是不是 regular file 只要 stat 我们打开的 fd 即可。
+
+经过修改之后，我们不需要给每个子挂载点打开 fd ，只需要在分区根挂载之前打开它的目录即可，在根目录被挂载了 overlayfs 后，我们可以通过 fd 访问原本被屏蔽的文件。
+
+## PoC
 
 https://github.com/5ec1cff/ksu-mount-POC
-
-~~由于不会 Rust 只好用 C++ 写了~~
 
 ### 实现分析
 
@@ -307,7 +316,9 @@ findTopMostMountsUnderPath：实际上就是找某个路径下所有有效的（
 
 比如上面的树中，/system 下 1, 4, 5, 7 都是有效的（在最上层）。这些挂载点按照倒序排列，就是最终要被挂上 overlayfs 的地方。
 
-### 实验
+术哥提了建议，找 child mounts 只要扫描一遍排个序就好了，想了一想确实如此，因为我们实际上不关心到底叠了多少层，只想知道哪些路径有挂载点。
+
+### Test cases
 
 考虑 /mnt/move-test 下面的四个目录 a,b,c,g ，其中模块目录为 g ，使用上面的 POC 挂载 overlayfs 。
 
