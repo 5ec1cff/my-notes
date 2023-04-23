@@ -258,3 +258,42 @@ struct sock_filter filter[] = {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP)
 };
 ```
+
+# Android 系统的 seccomp
+
+Zygote 在 SpecializeCommon 中给新进程设置了一系列 seccomp filter 。
+
+```cpp
+// frameworks/base/core/jni/com_android_internal_os_Zygote.cpp
+static void SetUpSeccompFilter(uid_t uid, bool is_child_zygote) {
+  if (!gIsSecurityEnforced) {
+    ALOGI("seccomp disabled by setenforce 0");
+    return;
+  }
+
+  // Apply system or app filter based on uid.
+  if (uid >= AID_APP_START) {
+    if (is_child_zygote) {
+      set_app_zygote_seccomp_filter();
+    } else {
+      set_app_seccomp_filter();
+    }
+  } else {
+    set_system_seccomp_filter();
+  }
+}
+```
+
+seccomp filter 通过 `bionic/libc/tools/genseccomp.py` 生成。
+
+bionic 对 syscall 设置了一套白名单和一套黑名单，在 `bionic/libc/SECCOMP_BLOCKLIST_COMMON.TXT` 的注释写了：
+
+```
+# This file is used to populate seccomp's allowlist policy in combination with SYSCALLS.TXT.
+# Note that the resultant policy is applied only to zygote spawned processes.
+#
+# The final seccomp allowlist is SYSCALLS.TXT - SECCOMP_BLOCKLIST.TXT + SECCOMP_ALLOWLIST.TXT
+# Any entry in the blocklist must be in the syscalls file and not be in the allowlist file
+#
+# This file is processed by a python script named genseccomp.py.
+```
