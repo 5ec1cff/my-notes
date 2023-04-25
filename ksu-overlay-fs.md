@@ -409,4 +409,12 @@ a
 └── c
 ```
 
+## 后记
 
+上面的工作最终被合并到了 KernelSU
+
+https://github.com/tiann/KernelSU/commit/c058cb8848b50ec59bbbc67fb10556bd6b47f9db
+
+后来发现部分设备 bind mount 文件出现 mount 返回 EROFS 的问题，一开始以为问题来自内核，在和多位用户合作排查后发现原来是 ksud 上游的 sys-mount 会把带有扩展名的文件当作镜像文件处理，自动创建了 loop 设备并 rw 打开文件，导致 EROFS 错误。
+
+https://github.com/tiann/KernelSU/commit/f963e40a5fed6e89529e83ac3b20d0f9d7f378b9
