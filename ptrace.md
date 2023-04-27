@@ -4,6 +4,10 @@
 
 [wait(2) - Linux manual page](https://man7.org/linux/man-pages/man2/waitpid.2.html)
 
+本文相关代码都在下面的仓库：
+
+https://github.com/5ec1cff/ptrace-examples
+
 ## tracee execve 时的行为
 
 当被跟踪者(tracee)进程成功调用 execve 后，会立即产生一个 SIGTRAP ，并进入 signal-delivery-stop 状态，允许我们在进程的所有新代码执行之前进行处理。
@@ -286,7 +290,7 @@ all processes exited
 
 为此首先需要准备要执行的代码，看上去就像 CTF 中的 shellcode ，用 pwntools 等工具很容易可以生成，不过考虑到我们要在未来的项目中使用，还是要学会自己生成 shellcode 。我们先从汇编开始。
 
-下面是~~不知道从哪个大学偷来的~~ x86-64 上的汇编 hello world 实例。
+下面是一个 x86-64 上的汇编 hello world 实例。
 
 ```
 # hello.s
@@ -878,7 +882,150 @@ x86-64 中的函数<ruby>调用约定<rt>Calling Convention</rt></ruby>大概是
 
 我们更希望使用熟悉的高级编程语言编写逻辑，然后注入到进程中执行。可以想到的方法是使用 ptrace mmap 代码，跳转到对应位置执行。更进一步地想，在动态链接的程序中，ptrace 通过 dlopen 打开我们事先编写的动态共享库，加载代码执行，这样就比上面的方法方便多了。
 
-## ……
+## 信号处理和 PTRACE_SEIZE
+
+siginfo:
+
+https://man7.org/linux/man-pages/man2/sigaction.2.html
+
+我们知道 ptrace 虽然强大，但是同一时间每个进程只允许一个进程作为它的 tracer 。当我们自己编写的 tracer 遇到了无法处理的问题，难以再挂接调试器到 tracee 上，除非我们主动 detach （当然，你也可以做调试 tracer ，进而间接调试 tracee 这样的套娃操作），那么这时候就需要我们 detach 的同时把进程留在 stop 状态。此外，我们也要知道如何附加一个一开始就是 stop 状态的进程。
+
+之前我们附加进程都是使用 `PTRACE_ATTACH` 或者 `PTRACE_TRACEME` 。
+
+……
+
+### attach 与 SIGSTOP
+
+下面考虑一个进程，一开始就通过 raise SIGSTOP 处于 stop 状态，然后使用 PTRACE_ATTACH 附加。
+
+一开始会得到一个 SIGSTOP 。尝试 GETSIGINFO 会得到 EINVAL 。
+
+```
+waiting ...
+process stopped by signal SIGSTOP (19), status=137f, event=(none)
+get siginfo: Invalid argument
+```
+
+接下来我们 CONT ，注入信号 0 ，得到另一个 SIGSTOP ，这个 STOP 来源于内核，看起来似乎是由 attach 产生的：
+
+```
+inject signal SIG0
+waiting ...
+process stopped by signal SIGSTOP (19), status=137f, event=(none)
+signo: 19, si_code:SI_KERNEL(128)
+```
+
+如果此时选择注入信号 0 ，那么原先 raise 的 stop 状态就被解除，进程随后执行完毕退出。
+
+如果选择注入信号 SIGSTOP ，接下来 waitpid 又会收到一个 SIGSTOP ，和第一个一样，无法得到 siginfo 。
+
+接下来如果注入信号 0 ，进程同样解除 stop ，执行完毕退出；如果选择不注入信号（也就是不调用 CONT），那么 waitpid 会继续等待，此时进程的状态是 tracing stop ，此时从外部发送 SIGCONT 信号，tracer 和 tracee 都没有任何反应。
+
+另外一个例子：运行一个无限循环的程序，tracer attach 上去，然后从外部 kill SIGSTOP ，得到一个 signal delivery stop：
+
+```
+inject signal SIG0
+inject 0 instead
+waiting ...
+process stopped by signal SIGSTOP (19), status=137f, event=(none)
+signo: 19, si_code:SI_USER(0)
+```
+
+此时注入 SIGSTOP 信号后，waitpid 也会得到一个无法获取 siginfo 的 SIGSTOP ：
+
+```
+inject signal SIGSTOP
+waiting ...
+process stopped by signal SIGSTOP (19), status=137f, event=(none)
+get siginfo: Invalid argument
+```
+
+我们期望当进程自己收到 SIGSTOP ，处于 stop 状态的时候，ptrace 能够等待一个 SIGCONT 让进程重启，而通过上面的例子来看，我们似乎没法做到这一点，因为不管是 attach 前 stop ，还是 attach 之后发生了 stop ，通过信号注入 SIGSTOP ，我们都会收到一个未知来源的 SIGSTOP 。此时注入任意信号，都会使进程继续运行；如果忽略它，则进程一直停留在 tracing stop 状态，且无法拦截任何信号。
+
+其实上面的问题正是 PTRACE_ATTACH 的缺陷，在 [man 2 ptrace](https://man7.org/linux/man-pages/man2/ptrace.2.html) 的 `Group-stops` 一节已经介绍了。而为了解决这个问题，在 Linux 3.4 推出了 PTRACE_SEIZE 。
+
+### PTRACE_SEIZE 下的 Group-stop
+
+ptrace 的 manual page 提到了几种不同的停止状态，包括 `signal-delivery-stop`, `group-stop`, `syscall-stop`, `PTRACE_EVENT stops` 四种。
+
+Group-stop 就是 SIGSTOP 等停止信号导致的进程停止，正常情况下，停止导致进程状态变为 T (stopped) ，而在 ptrace 下，它们导致进程状态变成 t (tracing-stop) 。在 PTRACE_ATTACH 模式中，Group-stop 汇报为 SIGSTOP ，此时调用 PTRACE_GETSIGINFO 应当返回 EINVAL ；而 PTRACE_SEIZE 中，这种停止状态得到的 status 满足 `(status >> 8) == (SIGSTOP | PTRACE_EVENT_STOP << 8)`。同时，PTRACE_GETSIGINFO 是有效的，其 si_code 也设为前面的 `status >> 8` 的值。
+
+……
+
+当进程进入 Group-stop 的时候，可以使用 `PTRACE_LISTEN` 「恢复」进程。此时进程保持停止，但可以接收信号。
+
+```
+... The state of the tracee after PTRACE_LISTEN is somewhat of a gray
+area: it is not in any ptrace-stop (ptrace commands won't work on
+it, and it will deliver waitpid(2) notifications), but it also
+may be considered "stopped" because it is not executing
+instructions (is not scheduled), and if it was in group-stop
+before PTRACE_LISTEN, it will not respond to signals until
+SIGCONT is received.
+```
+
+#### SIGSTOP
+
+如果 tracee 收到 SIGSTOP ，会进入 tracing-stop ，tracer 首先得到 signal delivery stop ，然后如果 tracer 注入了 SIGSTOP ，就会得到一个带有 PTRACE_EVENT_STOP 事件的 SIGTRAP。
+
+> SIGSTOP 可以被 tracer 忽略。
+
+```
+process stopped by signal SIGSTOP (19), status=137f, event=(none)
+signo: 19, si_code:SI_USER(0)
+
+inject signal SIGSTOP
+waiting ...
+process stopped by signal SIGSTOP (19), status=80137f, event=PTRACE_EVENT_STOP
+signo: 19, si_code:unknown(32787)
+```
+
+#### SIGCONT
+
+如果 tracee 收到 SIGCONT ，无论 tracee 是否处于 group-stop ， tracer 都会首先得到一个 SIGTRAP ，带有 PTRACE_EVENT_STOP 事件。
+
+```
+process stopped by signal SIGTRAP (5), status=80057f, event=PTRACE_EVENT_STOP
+signo: 5, si_code:PTRACE_EVENT_STOP(32773)
+```
+
+然后调用 PTRACE_CONT 注入信号 0，如果 SIGCONT 没有被屏蔽，才会进入 signal delivery stop ，注入 SIGCONT 可以让 tracee 继续运行。如果 SIGCONT 被 tracee 屏蔽了，进程会直接运行。
+
+```
+process stopped by signal SIGCONT (18), status=127f, event=(none)
+signo: 18, si_code:SI_USER(0)
+```
+
+此时注入信号 0 也会使得 tracee 继续运行（就像注入了 SIGCONT 一样），而注入信号 SIGSTOP 会使 tracee 保持停止。
+
+那么注入信号 0 和注入 SIGCONT 有什么区别呢？区别体现在是否调用信号处理器。
+
+正常进程接收 SIGCONT 的流程是这样的：
+
+1. 如果进程停止，则首先唤醒（此时忽视 SIGCONT 的屏蔽字）  
+2. 如果进程设置了 handler ，且 SIGCONT 没有被屏蔽，则调用 handler  
+
+在 ptrace 下，我们可以注入信号 0 ，以忽略第二步，也就是 SIGCONT 的 handler 调用，如果注入信号 SIGCONT ，就会调用 handler 。
+
+我写了一个[交互式程序](https://github.com/5ec1cff/ptrace-examples/blob/master/trace-repl.cpp)，并观察 interrupt 、listen、cont 以及信号导致停止的行为，总结如下：
+
+1. 向 tracee 发送 SIGSTOP ，首先产生 signal-delivery-stop ，可以注入或忽略 SIGSTOP ，注入后产生 SIGSTOP 的 PTRACE_EVENT_STOP  
+2. PTRACE_INTERRUPT 产生一个 SIGTRAP 的 PTRACE_EVENT_STOP 。  
+3. 所有的 PTRACE_EVENT_STOP 事件导致的停止都可以调用 PTRACE_LISTEN ，除此之外都不可以。  
+4. PTRACE_EVENT_STOP 导致的停止，可以通过 PTRACE_CONT (0) 使其继续运行。  
+5. 进入 listen 状态后，不能使用 PTRACE_CONT 继续 tracee 的运行，但是可以使用 PTRACE_INTERRUPT 中断。  
+6. 进入 listen 状态后，tracee 停止运行，但可以接收信号产生 signal-delivery-stop ；如果进入 listen 状态之前发送了信号（也就是有 pending 信号），进入之后也会产生 signal-delivery-stop 。  
+7. 向 tracee 发送 SIGCONT ，首先产生一个 SIGTRAP 的 PTRACE_EVENT_STOP ，行为和 PTRACE_INTERRUPT 相同。  
+
+至于怎么 detach 并保持停止，其实也很简单，首先 kill/tgkill SIGSTOP ，然后 PTRACE_DETACH sig=SIGSTOP 即可。这样相当于注入一个 SIGSTOP 信号。
+
+另外观察到一个现象：
+如果 seize 的时候 tracee 是停止的，那么即使用过 cont 0 使 tracee 在跟踪期间继续运行，在 tracer detach 或者直接退出的时候进程会重新变成停止的，除非跟踪期间进程收到过 SIGCONT 并被放行，或者存在 pending 的 SIGCONT；
+如果 seize 的时候 tracee 是运行的，则 tracer detach 或直接退出的时候 tracee 会保持运行，除非最后发送一个 SIGSTOP 。
+
+上面的现象可以解释为进程有一个 run / stop 的状态，可以通过 SIGSTOP 和 SIGCONT 修改，tracer 可以通过 ptrace 的暂时修改这个状态，让本来处于 stop 状态的进程运行，但 tracer 离开之后，进程又恢复到本来的状态。
+
+> 上文都是基于 man pages 和观察得出的结论，至于实际情况如何，还是要看内核源码的实现。
 
 ## 其他
 
