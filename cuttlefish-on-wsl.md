@@ -577,3 +577,75 @@ cuttlefish 虽然和 avd 一样可以重启，并且在虚拟机运行的时候�
 
 想要关闭，可以添加环境变量 `SKIP_MRPROPER=1`
 
+
+## AVD
+
+因为套了两层虚拟机的 cuttlefish 太慢了，所以想尝试在 AVD 上用自己编译的内核
+
+AVD Android 13 的内核版本：
+
+```
+Linux version 5.15.41-android13-8-00055-g4f5025129fe8-ab8949913 (build-user@build-host) (Android (8508608, based on r450784e) clang version 14.0.7 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6), LLD 14.0.7) #1 SMP PREEMPT Mon Aug 15 18:33:14 UTC 2022
+```
+
+我们的内核版本是：
+
+```
+Linux version 5.15.78-android13-8-g5761541a4eb5-dirty (build-user@build-host) (Android (8508608, based on r450784e) clang version 14.0.7 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6), LLD 14.0.7) #1 SMP PREEMPT Tue Mar 14 06:27:21 UTC 2023
+```
+
+把 bzImage 拖出来，启动：
+
+```
+emulator @API33 -kernel D:\Documents\tmp\bzImage -no-snapshot-load
+```
+
+系统没法启动，加上 `-show-kernel` 看看：
+
+```
+[    2.599831] Run /init as init process
+[    2.603781] init: init first stage started!
+[    2.608469] init: Loading module /lib/modules/btintel.ko with args ''
+[    2.614892] btintel: disagrees about version of symbol module_layout
+[    2.620898] init: Failed to insmod '/lib/modules/btintel.ko' with args '': Exec format error
+[    2.629025] init: LoadWithAliases was unable to load btintel
+[    2.634738] init: Copied ramdisk prop to /second_stage_resources/system/etc/ramdisk/build.prop
+[    2.642237] init: [libfs_mgr]ReadFstabFromDt(): failed to read fstab from dt
+[    2.648304] init: Using Android DT directory /proc/device-tree/firmware/android/
+[    2.666721] init: bool android::init::BlockDevInitializer::InitDevices(std::set<std::string>): partition(s) not found in /sys, waiting for their uevent(s): metadata, super, vbmeta
+[   12.692898] init: Wait for partitions returned after 10012ms
+[   12.699861] init: bool android::init::BlockDevInitializer::InitDevices(std::set<std::string>): partition(s) not found after polling timeout: metadata, super, vbmeta
+[   12.713764] init: Failed to mount required partitions early ...
+[   12.720204] init: InitFatalReboot: signal 6
+[   12.726655] init: #00 pc 00000000003211a8  /init (UnwindStackCurrent::UnwindFromContext(unsigned long, void*)+88)
+[   12.736803] init: #01 pc 0000000000311ace  /init (android::init::InitFatalReboot(int)+94)
+[   12.744743] init: #02 pc 0000000000311f63  /init (android::init::InstallRebootSignalHandlers()::$_24::__invoke(int)+19)
+[   12.754474] init: #03 pc 00000000004d97e0  /init (__restore_rt)
+[   12.759487] init: #04 pc 00000000004ce5be  /init (abort+190)
+[   12.764605] init: #05 pc 0000000000317b7b  /init (android::init::InitAborter(char const*)+27)
+[   12.771801] init: #06 pc 000000000048c64c  /init (android::base::SetAborter(std::__1::function<void (char const*)>&&)::$_3::__invoke(char const*)+60)
+[   12.782930] init: #07 pc 000000000048be1e  /init (android::base::LogMessage::~LogMessage()+350)
+[   12.790308] init: #08 pc 0000000000306fd2  /init (android::init::FirstStageMain(int, char**)+10354)
+[   12.797857] init: #09 pc 00000000004c5b0e  /init (__real_libc_init(void*, void (*)(), int (*)(int, char**, char**), structors_array_t const*, bionic_tcb*)+718)
+[   12.810138] init: Reboot ending, jumping to kernel
+[   12.819052] reboot: Restarting system with command 'bootloader'
+[   12.824401] reboot: machine restart
+```
+
+没想到内核模块居然没法加载，说好的只要 KMI 一致就能兼容呢？
+
+原版内核是这样的：
+
+```
+[    2.096434] Run /init as init process
+[    2.099515] init: init first stage started!
+[    2.102701] init: Loading module /lib/modules/btintel.ko with args ''
+[    2.107158] btintel: module verification failed: signature and/or required key missing - tainting kernel
+[    2.127307] init: Loaded kernel module /lib/modules/btintel.ko
+[    2.131362] init: Loading module /lib/modules/btrtl.ko with args ''
+[    2.136655] init: Loaded kernel module /lib/modules/btrtl.ko
+[    2.141533] init: Loading module /lib/modules/btusb.ko with args ''
+[    2.147191] usbcore: registered new interface driver btusb
+[    2.151017] init: Loaded kernel module /lib/modules/btusb.ko
+[    2.154253] init: Loading module /lib/modules/cfg80211.ko with args ''
+```
