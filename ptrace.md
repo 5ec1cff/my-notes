@@ -1027,6 +1027,31 @@ signo: 18, si_code:SI_USER(0)
 
 > 上文都是基于 man pages 和观察得出的结论，至于实际情况如何，还是要看内核源码的实现。
 
+### SIGCHLD 和 ptrace
+
+我们知道子进程的退出、停止和继续都可以对父进程产生 SIGCHLD 信号，而 ptrace 停止实际上也会导致 tracer 收到 SIGCHLD 信号。
+
+### signalfd 和 ptrace
+
+[signalfd](https://man7.org/linux/man-pages/man2/signalfd.2.html) 是另一种信号处理机制，允许我们通过 poll fd 的方式接收信号，在 Android 的 [init](https://cs.android.com/android/platform/superproject/+/refs/heads/master:system/core/init/init.cpp;l=751;drc=7346c436e5a11ce08f6a80dcfeb8ef941ca30176) 中就使用了 signalfd 处理子进程退出。
+
+在使用 signalfd 处理信号的情况下，对应的信号需要设置 block 以避免信号的默认处置。
+
+```
+... Normally, the set of signals to be
+received via the file descriptor should be blocked using
+sigprocmask(2), to prevent the signals being handled according to
+their default dispositions.
+```
+
+#### ptrace 使用 signalfd
+
+既然 ptrace 停止可以产生 SIGCHLD ，那么能否使用 signalfd 处理 ptrace 事件呢？
+
+#### 信号注入和 signalfd
+
+如果 tracee 使用 signalfd ，那么必然会屏蔽某些信号，此时 ptrace 是无法接收这些信号的，这种情况下如何控制信号注入？
+
 ## 其他
 
 chromium 项目的 errno 和 signal
