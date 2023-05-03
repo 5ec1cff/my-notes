@@ -13,7 +13,7 @@
 
 https://github.com/5ec1cff/ptrace-examples/tree/android
 
-实现了注入到任意进程，调用 __loader_dlopen 打开指定路径的 lib ，或者调用 __loader_dlclose 关闭指定 handle 的 lib 。目前只能在 x86-64 上运行。
+实现了注入到任意进程，调用 __loader_dlopen 打开指定路径的 lib ，或者调用 __loader_dlclose 关闭指定 handle 的 lib 。目前只支持 x86-64 和 arm64 。
 
 ### 对齐问题
 
@@ -166,3 +166,68 @@ dumpable:0x1
 另外，init 的日志比较特殊，在我的 AVD 上，无法通过 `logcat --pid 1` 获取 init 的日志，而实际上 init 仍然会往 logd 写入日志，只是 pid 为 0 ，我们无法通过 `logcat --pid 0` 获取 init 的日志。更加奇怪的是，debug.ld 也无法影响 init 的 linker ，也就是无法产生 linker 日志，尽管 init 本来就是 dumpable 的，可能和 init 自身的 linker 有关。
 
 考虑到 init 是一个非常特殊的进程，它的死亡会直接导致 kernel panic ，因此 ptrace 注入它还是要小心谨慎。
+
+## 其他指令集
+
+### arm64
+
+#### 函数调用
+
+函数调用的汇编代码：
+
+```
+blr x9
+brk #0x1
+```
+
+编译成机器码就是 `0x20, 0x1, 0x3f, 0xd6, 0x20, 0x0, 0x20, 0xd4` 或者 `0xd4200020d63f0120` 。
+
+其中 `brk #0x1` 是从 `__builtin_trap()` 得来的，cpu 到这条指令断下来之后似乎不会增加 pc 的值。
+
+https://stackoverflow.com/questions/11345371/how-do-i-set-a-software-breakpoint-on-an-arm-processor
+
+https://stackoverflow.com/questions/44949124/absolute-jump-with-a-pc-relative-data-source-aarch64
+
+arm64 的调用约定：x0~x7 作为函数参数，x0 也作为返回值。由于 x9 是被调用方保存的寄存器，因此选择它来传递函数的绝对地址。
+
+#### 系统调用
+
+```
+svc 0
+```
+
+机器码：`0x1, 0x0, 0x0, 0xd4` 或者 `0xd4000001` 。
+
+参数：x0~x5 ，返回值是 x0 ，系统调用号 NR 是 x8 。
+
+https://syscall.sh/
+
+下面是直接注入当前 shell 的效果：
+
+```
+u0_a212@192.168.1.xxx ~
+$ ./injector open $$ $PWD/libinject-lib.so; logcat --pid $$
+dlopen /data/data/com.termux/files/home/libinject-lib.so on 26496
+
+found linker in maps, base=0x701ef49000,path=/apex/com.android.runtime/bin/linker64
+dlopen_addr: 0x701ef7a190
+sp=0x7ffa8d84e0
+string pushed to 0x7ffa8d84ae (size=50)
+pc=0x701d9c1c94 instruction: b140041fd4000001
+handle: 0xfcff7941be05802d
+--------- beginning of main
+05-03 20:23:54.309 26496 26496 D pt-injector: injected
+^C
+u0_a212@192.168.1.xxx ~
+$ ./injector close $$  0xfcff7941be05802d; logcat --pid $$
+dlclose 0xfcff7941be05802d on 26496
+
+found linker in maps, base=0x701ef49000,path=/apex/com.android.runtime/bin/linker64
+dlclose_addr: 0x701ef7a2d8
+pc=0x701d9c1c94 instruction: b140041fd4000001
+--------- beginning of main
+05-03 20:23:54.309 26496 26496 D pt-injector: injected
+05-03 20:24:08.152 26496 26496 D pt-injector: closed
+```
+
+
