@@ -169,7 +169,7 @@ dumpable:0x1
 
 ## 其他指令集
 
-### arm64
+### arm64-v8a
 
 #### 函数调用
 
@@ -230,4 +230,145 @@ pc=0x701d9c1c94 instruction: b140041fd4000001
 05-03 20:24:08.152 26496 26496 D pt-injector: closed
 ```
 
+### armeabi-v7a
 
+arm 的适配应该是最艰难的。
+
+https://developer.android.com/ndk/guides/abis?hl=zh-cn#v7a
+
+#### 断点
+
+`__builtin_trap`:
+
+```asm
+defe            udf     #254    ; 0xfe
+```
+
+直接执行并不产生 trap ，而是得到一个 SIGILL ：
+
+```
+u0_a212@192.168.1.144 ~/codes
+$ strace ../bkpt_exe
+execve("../bkpt_exe", ["../bkpt_exe"], 0xb400007268e0e000 /* 47 vars */ <unfinished ...>
+[ Process PID=19460 runs in 32 bit mode. ]
+<... execve resumed>)                   = 0
+--- SIGILL {si_signo=SIGILL, si_code=ILL_ILLOPC, si_addr=0x11128} ---
++++ killed by SIGILL +++
+Illegal instruction
+```
+
+https://developer.arm.com/documentation/dui0801/h/A32-and-T32-Instructions/UDF  
+https://stackoverflow.com/questions/11345371/how-do-i-set-a-software-breakpoint-on-an-arm-processor  
+
+`bkpt #0` ：
+
+```
+e1200070        bkpt    0x0000
+```
+
+得到 Trap ：
+
+```
+u0_a212@192.168.1.144 ~/codes
+$ strace ../bkpt_exe
+execve("../bkpt_exe", ["../bkpt_exe"], 0xb40000775740e000 /* 47 vars */ <unfinished ...>
+[ Process PID=19616 runs in 32 bit mode. ]
+<... execve resumed>)                   = 0
+--- SIGTRAP {si_signo=SIGTRAP, si_code=TRAP_BRKPT, si_addr=0x110f8} ---
++++ killed by SIGTRAP +++
+Trap
+```
+
+此外观察 si_addr 发现两者都不会越过断点。
+
+https://developer.arm.com/documentation/dui0473/m/arm-and-thumb-instructions/bkpt
+
+#### thumb 模式
+
+arm 上有 arm 和 thumb 两种指令集，根据跳转地址的最后一位来区分并切换 cpu 工作状态。Android 上 armeabi-v7a 默认都是编译为 thumb 指令集，那么 pc 寄存器里面的实际值是什么呢？
+
+使用 debuggerd 观察 32 位 arm 进程的堆栈：
+
+```
+"pal.androidterm" sysTid=24586
+    #00 pc 0009c2fc  /apex/com.android.runtime/lib/bionic/libc.so!libc.so (offset 0x9b000) (__epoll_pwait+20) (BuildId: edc23b5a08cb25fcac190e6392a4d537)
+    #01 pc 0006dbc9  /apex/com.android.runtime/lib/bionic/libc.so!libc.so (offset 0x6c000) (epoll_wait+16) (BuildId: edc23b5a08cb25fcac190e6392a4d537)
+```
+
+libc.so 是一个 thumb 指令集的 so ，看起来 pc 寄存器保存的还是实际的地址，也就是只有偶数，而堆栈回溯可以看到奇数地址实际上是因为这个地址不是来自 pc ，而是来自栈上。
+
+……
+
+实际上 Android 大部分进程都运行在 thumb 模式，对于 arm 模式和 thumb 模式，我们需要不同的 shellcode ，而上面生成的是 arm 模式的机器码。
+
+为了确保一致性，我直接用 NDK 编译。
+
+```cmake
+enable_language(ASM)
+
+if(ANDROID_ABI STREQUAL "armeabi-v7a")
+    message("current abi is armeabi-v7a")
+    add_executable(libshellcode.so shellcode/armeabi-v7a.s)
+    target_link_libraries(libshellcode.so -nostdlib -static)
+endif()
+```
+
+https://stackoverflow.com/questions/22396214/understanding-this-part-arm-assembly-code
+
+下面的代码加上了 `.thumb_func` 确保生成 thumb 代码。
+
+```asm
+        .global _start
+
+        .text
+        .thumb_func
+_start:
+call_code:
+    blx r4
+break_code:
+    bkpt #0
+svc_code:
+    svc 0
+```
+
+```
+$ arm-linux-gnueabi-objdump -d /mnt/f/works/ptinjector/app/build/intermediates/merged_native_libs/debug/out/lib/armeabi-
+v7a/libshellcode.so
+
+/mnt/f/works/ptinjector/app/build/intermediates/merged_native_libs/debug/out/lib/armeabi-v7a/libshellcode.so:     file format elf32-littlearm
+
+
+Disassembly of section .text:
+
+000110f8 <_start>:
+   110f8:       47a0            blx     r4
+
+000110fa <break_code>:
+   110fa:       be00            bkpt    0x0000
+
+000110fc <svc_code>:
+   110fc:       df00            svc     0
+
+$ dd if=/mnt/f/works/ptinjector/app/build/intermediates/merged_native_libs/debug/out/lib/armeabi-v7a/libshellcode.so skip=$((0xf8)) count=16 bs=1c |xxd
+00000000: a047 00be 00df 411d 0000 0061 6561 6269  .G....A....aeabi
+```
+
+最终 shellcode （注释的代码为 arm 模式的，暂不考虑支持）：
+
+```cpp
+// const unsigned long CODE_FOR_CALL[] = { 0x34ff2fe1lu, 0x700020e1lu }; // blx r4; bkpt #0
+const unsigned long CODE_FOR_CALL[] = { 0xbe0047a0lu }; // blx r4; bkpt #0
+// const unsigned long CODE_FOR_SYSCALL[] = { 0x000000eflu }; // svc 0
+const unsigned long CODE_FOR_SYSCALL[] = { 0xdf00lu }; // svc 0
+// const auto CALL_EXPECTED_OFFSET = 4;
+```
+
+至于进程运行在什么模式，可以通过 cpsr 寄存器的 T 标志（第五位）判断：
+
+https://developer.arm.com/documentation/den0013/d/ARM-Processor-Modes-and-Registers/Registers/Program-Status-Registers
+
+```cpp
+#define ARM_IS_THUMB(regs) (((regs).ARM_cpsr & (1 << 5)) != 0)
+```
+
+实践表明，通过 ptrace 修改 cpsr 的 T 标志不会使进程切换模式，因此如果要同时支持 thumb 和 arm ，必须写两套代码。
