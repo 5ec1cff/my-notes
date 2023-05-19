@@ -295,7 +295,7 @@ arm 上有 arm 和 thumb 两种指令集，根据跳转地址的最后一位来�
     #01 pc 0006dbc9  /apex/com.android.runtime/lib/bionic/libc.so!libc.so (offset 0x6c000) (epoll_wait+16) (BuildId: edc23b5a08cb25fcac190e6392a4d537)
 ```
 
-libc.so 是一个 thumb 指令集的 so ，看起来 pc 寄存器保存的还是实际的地址，也就是只有偶数，而堆栈回溯可以看到奇数地址实际上是因为这个地址不是来自 pc ，而是来自栈上。
+libc.so 的代码是 thumb 指令集的，看起来 pc 寄存器保存的还是实际的地址，也就是只有偶数，而堆栈回溯可以看到奇数地址实际上是因为这个地址不是来自 pc ，而是来自栈上。
 
 ……
 
@@ -372,3 +372,73 @@ https://developer.arm.com/documentation/den0013/d/ARM-Processor-Modes-and-Regist
 ```
 
 实践表明，通过 ptrace 修改 cpsr 的 T 标志不会使进程切换模式，因此如果要同时支持 thumb 和 arm ，必须写两套代码。
+
+### x86
+
+说到底 32 位就是坑，比起 armeabi-v7 ，还是 x86 更加坑。难怪大家都不想兼容 32 位。
+
+#### 调用约定
+
+x86 上有三种调用约定：stdcall, cdecl, fastcall 。其中只有 fastcall 会通过寄存器传参，而且只是少得可怜的两个。Android 作为 类 unix 系统，应该用 cdecl 。不过说到底这三种规范的区别只是在于栈平衡的维护者到底是 caller 还是 callee ，而我们的注入调用其实不需要纠结维护栈平衡的问题——反正都有备份。
+
+其他架构上我们只要往寄存器传参，基本能满足大部分需求，然而在 x86 ，你需要通过栈传参。
+
+#### syscall
+
+x86 的 syscall 也非常骚，所有的系统调用都通过 vdso 的 __kernel_vsyscall 执行，比如下面的 poll ：
+
+```
+"main" sysTid=24552
+    #00 pc 00000b89  [vdso] (__kernel_vsyscall+9)
+    #01 pc 000cdeb6  /apex/com.android.runtime/lib/bionic/libc.so (__ppoll+38) (BuildId: 57f4eb5e1df9fa8bd21032ad6be9823f)
+    #02 pc 00083119  /apex/com.android.runtime/lib/bionic/libc.so (poll+105) (BuildId: 57f4eb5e1df9fa8bd21032ad6be9823f)
+    #03 pc 00027733  /apex/com.android.art/lib/libjavacore.so (Linux_poll(_JNIEnv*, _jobject*, _jobjectArray*, int)+595) (BuildId: c7f6465a601f9e86c20e3630f4fa90e6)
+```
+
+这样就显现出了我们之前做法的弊端。我们之前都是通过 ptrace 替换进程停下来的位置 pc 处指令执行任意代码，一般来说进程都会停在某个长期阻塞的 syscall 上。现在在 x86 上，这个位置总是 vdso ，如果我们替换了这里的指令，然后又调用某个会进行系统调用的函数（显然，dlopen 会进行若干系统调用），就导致函数调用中的 syscall 错误地执行了我们的指令。
+
+#### 使用受控内存？
+
+因此我们需要思考解决方法，一个显然的想法就是：我们需要一块自己管理的内存。
+
+在这种想法下，不管是写入指令、写入数据、调用使用的栈，都在我们所管理的内存上，这样就避免了借用 tracee 程序自身资源导致的问题。
+
+不过我们仍然需要某种方法创建受控内存，比如远程调用 mmap ，如果程序真的需要在 tracee 创建可控的内存区域，必须通过上面的「不安全」方法实现。这样给编码也带来的麻烦：我们需要实现两套代码。
+
+因此在实践这个方法之前，我想首先尝试另一种方法实现函数调用。
+
+#### 模拟 call
+
+上面的想法是对任意进程考虑的，也就是假定 tracee 可能是静态链接的程序，可能无法找到 libc, linker 等我们能利用的代码，而设计的通用方法，我们不得不自己写 shellcode 到进程中。
+
+然而大部分情况下，我们要注入的就是一个动态链接的程序，并且假定它没有对自身或者其他动态链接库进行修改。这时候我们可以利用的东西还是很多的。
+
+也许我们不写 shellcode 也能实现函数调用。
+
+想法是，直接修改 pc 到要调用的函数地址，并且返回地址写一个非法地址，这样函数调用返回的时候就能通过 SIGSEGV 截获。
+
+但是当我真正实现这个方法的时候发现有很多问题。我写了一个用上面的方法调用 mmap 映射一块只读内存的程序，在 x86 和 x64 上测试注入 zygote 的结果：
+
+在 x86 上，当我们安排好栈上的调用参数和返回地址，修改好 pc ，ptrace continue 的时候，下一次停止发现它得到一个 SIGTRAP ，原因是 pc 并没有前进，反而回退了一个字节，刚好是 0xcc 。
+
+在 x64 上，看上去是得到了 SIGSEGV ，但是 pc 回退了 4 个字节，也不是我预定的那个非法地址。此时 single step 不管怎么走都无法前进。
+
+以上两个现象出现在 zygote 中，而 x64 下普通 app 进程这么调用是正常的。x86 尚未测试。
+
+我怀疑是系统调用重启的一些副作用，有待进一步调查。
+
+## 参考
+
+[数据模型（LP32 ILP32 LP64 LLP64 ILP64 ） - lsgxeva - 博客园](https://www.cnblogs.com/lsgxeva/p/7614856.html)
+
+[Calling convention - Wikipedia](https://en.wikipedia.org/wiki/Calling_convention)
+
+[&#x5b;原创&#x5d;常见函数调用约定(x86、x64、arm、arm64)-软件逆向-看雪论坛-安全社区|安全招聘|bbs.pediy.com](https://bbs.kanxue.com/thread-224583.htm)
+
+[x86-64 下函数调用及栈帧原理 - 知乎](https://zhuanlan.zhihu.com/p/27339191)
+
+bionic 的 syscall 实现（不同架构写在不同目录下，使用汇编）：
+
+```
+bionic/libc/arch-XXXXX/bionic/syscall.S
+```
