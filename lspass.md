@@ -4,11 +4,11 @@
 
 ### ART 对象表示
 
-在 ART 中，一个 Java 对象与一个 art::mirror::Object 一一对应，此外一些系统的特殊类会和 mirror Object 的派生类对应，如 java/lang/Class 对应 art::mirror::Class 。
+在 ART 中，一个 Java 对象与一个 `art::mirror::Object` 一一对应，此外一些系统的特殊类会和 mirror Object 的派生类对应，如 java/lang/Class 对应 `art::mirror::Class` 。
 
 mirror::Object 对象所包含的内容就是 instance field 的内容，因此它的大小和类的 instance field 有关。之所以叫 mirror ，是因为这些 mirror 类中定义的成员和 Java 类的字段(field)是一致的。
 
-一般的类的对象对应的都是 art::mirror::Object ，访问 field 是通过对象地址 + field offset 实现的。如果一个类继承另一个类，则内存布局上子类的 field 排在父类的后面，这和结构体继承的内存布局是一致的。
+一般的类的对象对应的都是 `art::mirror::Object` ，访问 field 是通过对象地址 + field offset 实现的。如果一个类继承另一个类，则内存布局上子类的 field 排在父类的后面，这和结构体继承的内存布局是一致的。
 
 例如 `art::mirror::Object` 只有两个成员：
 
@@ -30,7 +30,7 @@ java.lang.Object 也只有两个字段：
 
 在 C++ 中的两个成员和 Java 中这两个字段都是一一对应的。
 
-又如 art::mirror::Class 和 java.lang.Class ，它的字段更多：
+又如 `art::mirror::Class` 和 java.lang.Class ，它的字段更多：
 
 ```cpp
 // art/runtime/mirror/class.h
@@ -71,17 +71,17 @@ java.lang.Object 也只有两个字段：
     // ...
 ```
 
-由于 art::mirror::Class 继承 art::mirror::Object ，因此它也有 `shadow$_klass_` 和 `shadow$_monitor_` 两个字段，而在 Java 中 java.lang.Class 也是继承 java.lang.Object 的，由此可见二者在 java 和 native 中对象关系的一致性。
+由于 `art::mirror::Class` 继承 `art::mirror::Object` ，因此它也有 `shadow$_klass_` 和 `shadow$_monitor_` 两个字段，而在 Java 中 java.lang.Class 也是继承 java.lang.Object 的，由此可见二者在 java 和 native 中对象关系的一致性。
 
 从注释中可以看到，Object 的内存布局，也就是各个 instance fields 的布局由 `art::ClassLinker::LinkFieldsHelper::LinkFields` 决定。
 
 #### LinkFields
 
-ClassLinker::LinkFieldsHelper::LinkFields -> .. -> ArtField::SetOffset
+`ClassLinker::LinkFieldsHelper::LinkFields -> .. -> ArtField::SetOffset`
 
 https://cs.android.com/android/platform/superproject/main/+/main:art/runtime/class_linker.cc;l=9099;drc=c0eb27ecf91c807d66efbae6991918557627e120
 
-从注释可以看出，field 的布局与我们在 java 中定义的顺序或者 dex 的 index 都无关，而是与所有 field 的名字和类型相关。首先按照类型 object, long, double, int, float, char, short, boolean, byte 的顺序，然后按照 field 名的字典序分布。因此，art::mirror 上手动定义的成员也要遵守这个顺序。
+从注释可以看出，field 的布局与我们在 java 中定义的顺序或者 dex 的 index 都无关，而是与所有 field 的名字和类型相关。首先按照类型 object, long, double, int, float, char, short, boolean, byte 的顺序，然后按照 field 名的字典序分布。因此，`art::mirror` 上手动定义的成员也要遵守这个顺序。
 
 ```cpp
   // we want a relatively stable order so that adding new fields
