@@ -107,6 +107,21 @@ art_method_offset 表示 ArtMethod 地址在指令中的位置（按字节）。
        8: c3                            retl
 ```
 
+## 疑难杂症
+
+### 设置备份为 private
+
+https://github.com/LSPosed/LSPlant/blob/ab5830a0207a76cc2abc82e6d4f15f2053f51523/lsplant/src/main/jni/lsplant.cc#L530
+
+```cpp
+if (!backup->IsStatic()) backup->SetPrivate();
+```
+
+和方法的解析有关，一般非 static 非 private 则认为是虚函数，会在虚表上解析，导致无法正确解析到备份方法的地址
+
+可以参考 [ART深度探索开篇：从Method Hook谈起 | Weishu's Notes](https://weishu.me/2017/03/20/dive-into-art-hello-world/)
+
+> 在调用的时候，如果不是static的方法，会去查找这个方法的真正实现；我们直接把原方法做了备份之后，去调用备份的那个方法，如果此方法是public的，则会查找到原来的那个函数，于是就无限循环了；我们只需要阻止这个过程，查看 FindVirtualMethodForVirtualOrInterface 这个方法的实现就知道，只要方法是 invoke-direct 进行调用的，就会直接返回原方法，这些方法包括：构造函数，private的方法( 见 https://source.android.com/devices/tech/dalvik/dalvik-bytecode.html) 因此，我们手动把这个备份的方法属性修改为private即可解决这个问题。
 
 ## 参考
 
