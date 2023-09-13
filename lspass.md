@@ -301,6 +301,36 @@ getDeclaredMethods:
 
 有了 invoke 后，调用 `dalvik.system.VMRuntime.setHiddenApiExemptions` 即可。
 
+## 其他方法
+
+### JNI_OnLoad
+
+一个冷知识是，在 JNI_OnLoad 的时候，实际上没有任何隐藏 API 限制！
+
+这是因为 JNI 的调用检查的依据是 caller class 。当 JNI_OnLoad 被调用的时候，Caller 是 `java.lang.Runtime` ，这是个系统类，显然可以得到豁免。
+
+一般情况下，调用 JNI 方法的 caller 是自己，因此就无法豁免了。
+
+[jni_internal.cc GetJniAccessContext](https://cs.android.com/android/platform/superproject/main/+/main:art/runtime/jni/jni_internal.cc;l=245;drc=b6d38bcf24888f11cb3bf0ceaf2b6e30dd683853)
+
+```cpp
+static hiddenapi::AccessContext GetJniAccessContext(Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Construct AccessContext from the first calling class on stack.
+  // If the calling class cannot be determined, e.g. unattached threads,
+  // we conservatively assume the caller is trusted.
+  ObjPtr<mirror::Class> caller = GetCallingClass(self, /* num_frames= */ 1);
+  return caller.IsNull() ? hiddenapi::AccessContext(/* is_trusted= */ true)
+                         : hiddenapi::AccessContext(caller);
+}
+```
+
+其实这和以前的（失效的）[元反射](https://weishu.me/2019/03/16/another-free-reflection-above-android-p/)类似，都是 visit stack 的时候没有考虑到系统类调用的情形。元反射最终被修复了，因为对于反射，walk stack 会寻找调用者中第一个不是 java.lang.Class, java.lang.reflect, java.lang.invoke 的类。
+
+[art/runtime/hidden_api.cc GetReflectionCallerAccessContext](https://cs.android.com/android/platform/superproject/main/+/main:art/runtime/hidden_api.cc;l=168;drc=b6d38bcf24888f11cb3bf0ceaf2b6e30dd683853)
+
+类似地，如果创建一个 native 线程（pthread_create 之类）再 attach ，此时的 caller 根本不存在，因此 GetJniAccessContext 直接把它当作 trusted domain 了，这样也可以调用隐藏 API 。
+
 ## 参考
 
 [Android运行时ART加载类和方法的过程分析 · 老罗的Android之旅（总结） · 看云](https://www.kancloud.cn/alex_wsc/androids/473623)
