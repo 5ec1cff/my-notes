@@ -297,7 +297,7 @@ getDeclaredMethods:
 
 当然用 getDeclaredMethod 得到的 Method 对象也是可以的。
 
-## 全局解除 API 限制
+## 进程内全局解除 API 限制
 
 有了 invoke 后，调用 `dalvik.system.VMRuntime.setHiddenApiExemptions` 即可。
 
@@ -305,9 +305,9 @@ getDeclaredMethods:
 
 ### JNI_OnLoad
 
-一个冷知识是，在 JNI_OnLoad 的时候，实际上没有任何隐藏 API 限制！
+JNI_OnLoad 的时候，实际上没有任何隐藏 API 限制！
 
-这是因为 JNI 的调用检查的依据是 caller class 。当 JNI_OnLoad 被调用的时候，Caller 是 `java.lang.Runtime` ，这是个系统类，显然可以得到豁免。
+这是因为 JNI 的调用检查的依据是 Java 调用堆栈的 caller class 。当 JNI_OnLoad 被调用的时候，Caller 是 `java.lang.Runtime` ，这是个系统类，显然可以得到豁免。
 
 一般情况下，调用 JNI 方法的 caller 是自己，因此就无法豁免了。
 
@@ -329,7 +329,37 @@ static hiddenapi::AccessContext GetJniAccessContext(Thread* self)
 
 [art/runtime/hidden_api.cc GetReflectionCallerAccessContext](https://cs.android.com/android/platform/superproject/main/+/main:art/runtime/hidden_api.cc;l=168;drc=b6d38bcf24888f11cb3bf0ceaf2b6e30dd683853)
 
-类似地，如果创建一个 native 线程（pthread_create 之类）再 attach ，此时的 caller 根本不存在，因此 GetJniAccessContext 直接把它当作 trusted domain 了，这样也可以调用隐藏 API 。
+类似地，如果创建一个 native 线程（pthread_create 之类）再 attach ，此时的 caller 根本不存在，因此 GetJniAccessContext 直接把它当作 trusted domain 了，这样也可以调用隐藏 API 。或者也可以通过反射调用自己的 JNI 函数。
+
+### 系统设置
+
+[Google 留给开发者的后门](https://developer.android.com/guide/app-compatibility/restrictions-non-sdk-interfaces#how_can_i_enable_access_to_non-sdk_interfaces)。修改系统设置可以在系统范围内给所有进程解除隐藏 API 限制。修改系统设置是不需要 root 的。
+
+解除：
+
+```
+adb shell settings put global hidden_api_policy  1
+adb shell settings put global hidden_api_policy_pre_p_apps  1
+adb shell settings put global hidden_api_policy_p_apps 1
+```
+
+还原：
+
+```
+adb shell settings delete global hidden_api_policy
+adb shell settings delete global hidden_api_policy_pre_p_apps
+adb shell settings delete global hidden_api_policy_p_apps
+```
+
+实质上是让系统服务创建进程的时候改变 runtimeFlags ，关闭隐藏 API 限制。
+
+## DexFile.setTrusted
+
+LSPlant 的 [MakeDexFileTrusted](https://github.com/LSPosed/LSPlant/blob/ab5830a0207a76cc2abc82e6d4f15f2053f51523/lsplant/src/main/jni/lsplant.cc#L876) 可以给某个 dex 解除隐藏 api 限制，其[实现](https://github.com/LSPosed/LSPlant/blob/master/lsplant/src/main/jni/art/runtime/dex_file.hpp#L107)是调用 art 内部函数 `DexFile::setTrusted` 。LSPosed 利用这个方法([1](https://github.com/LSPosed/LSPosed/blob/b2ab117380ce4d6a35d56b0285999b659dcb067d/core/src/main/jni/src/context.cpp#L86), [2](https://github.com/LSPosed/LSPosed/blob/b2ab117380ce4d6a35d56b0285999b659dcb067d/core/src/main/java/org/lsposed/lspd/hooker/OpenDexFileHooker.java#L28))给自己和模块的 dex 解除限制，因此模块可以正常使用隐藏的 api 。
+
+## 总结
+
+LSPass 应该是目前功能最为完备的隐藏 api 限制绕过工具了，不仅可以在进程内全局解除 api 限制，也可以在不解除 api 限制的情况下使用隐藏 api ，避免对应用产生影响（[LSPatch 的例子](https://github.com/LSPosed/LSPatch/blob/b35f3c549a8338702ae0601a3a5ee5390759fead/meta-loader/src/main/java/org/lsposed/lspatch/metaloader/LSPAppComponentFactoryStub.java#L73)）。
 
 ## 参考
 
